@@ -1,0 +1,36 @@
+# Core MCP and FastAPI dependencies
+mcp>=1.0.0
+fastmcp>=0.3.0
+uvicorn[standard]>=0.24.0
+starlette>=0.28.0
+
+# AI and LLM dependencies
+openai>=1.12.0
+instructor>=0.4.0
+pydantic>=2.5.0
+
+# Web crawling and content extraction
+crawl4ai>=0.3.0
+beautifulsoup4>=4.12.0
+requests>=2.31.0
+
+# Caching (simplified - remove cachetools dependency)
+# Using built-in collections and datetime for TTL cache
+
+# Async and concurrency
+asyncio-throttle>=1.0.0
+
+# Environment and configuration
+python-dotenv>=1.0.0
+
+# Logging and monitoring
+structlog>=23.2.0
+
+# Optional: For enhanced error handling
+httpx>=0.25.0
+
+# Development dependencies (optional)
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+black>=23.9.0
+mypy>=1.6.0
