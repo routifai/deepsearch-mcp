@@ -25,6 +25,11 @@ class Config:
     GOOGLE_CSE_ID: str = os.getenv("GOOGLE_CSE_ID", "")
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
     
+    # LLM Configuration
+    OPENAI_BASE_URL: str = os.getenv("OPENAI_BASE_URL", "")
+    OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    LLM_CLIENT_TYPE: str = os.getenv("LLM_CLIENT_TYPE", "default")  # "default" or "custom"
+    
     # Performance Settings
     MAX_PAGES: int = int(os.getenv("MAX_PAGES", "20"))
     MAX_CONCURRENT: int = int(os.getenv("MAX_CONCURRENT", "3"))
@@ -105,6 +110,10 @@ class Config:
         if not self.OPENAI_API_KEY:
             return False, "OpenAI API key required for query analysis (OPENAI_API_KEY)"
         
+        # Validate custom base URL if specified
+        if self.LLM_CLIENT_TYPE == "custom" and not self.OPENAI_BASE_URL:
+            return False, "Custom LLM client requires OPENAI_BASE_URL"
+        
         return True, "LLM configuration valid"
     
     def validate(self) -> bool:
@@ -129,6 +138,15 @@ class Config:
         """Get knowledge cutoff as datetime object"""
         return datetime.fromisoformat(self.KNOWLEDGE_CUTOFF)
     
+    def get_llm_config(self) -> dict:
+        """Get LLM configuration for client initialization"""
+        return {
+            "api_key": self.OPENAI_API_KEY,
+            "base_url": self.OPENAI_BASE_URL if self.LLM_CLIENT_TYPE == "custom" else None,
+            "model": self.OPENAI_MODEL,
+            "client_type": self.LLM_CLIENT_TYPE
+        }
+    
     def get_status_info(self) -> dict:
         """Get configuration status for health checks"""
         available_providers = self.get_available_search_providers()
@@ -143,6 +161,9 @@ class Config:
             },
             "llm": {
                 "configured": bool(self.OPENAI_API_KEY),
+                "client_type": self.LLM_CLIENT_TYPE,
+                "base_url": self.OPENAI_BASE_URL if self.LLM_CLIENT_TYPE == "custom" else "default",
+                "model": self.OPENAI_MODEL,
                 "knowledge_cutoff": self.KNOWLEDGE_CUTOFF
             },
             "performance": {

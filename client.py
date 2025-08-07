@@ -25,23 +25,11 @@ logger = logging.getLogger(__name__)
 class OpenAIMCPClient:
     """Interactive MCP client using OpenAI for intelligent tool usage"""
     
-    def __init__(self, 
-                 server_url: str = "http://localhost:8000/mcp",
-                 llm_client_type: str = "default",
-                 custom_base_url: Optional[str] = None,
-                 model: str = "gpt-4o-mini"):
+    def __init__(self, server_url: str = "http://localhost:8000/mcp"):
         self.server_url = server_url
         
-        # Initialize LLM client based on type
-        if llm_client_type == "default":
-            self.llm_client = create_default_client(model)
-        elif llm_client_type == "custom":
-            if not custom_base_url:
-                raise ValueError("custom_base_url is required for custom client type")
-            self.llm_client = create_custom_client(custom_base_url, model)
-        else:
-            raise ValueError("llm_client_type must be 'default' or 'custom'")
-        
+        # Use centralized LLM configuration
+        self.llm_client = get_llm_client()
         self.openai_client = self.llm_client.get_async_client()
         self.model = self.llm_client.model
         
@@ -203,6 +191,8 @@ class OpenAIMCPClient:
             logger.error(f"Connection test failed: {e}")
             return False
 
+
+
 async def main():
     """Main interactive chat function"""
     print("🚀 Intelligent Search MCP Client v3.0")
@@ -217,7 +207,15 @@ async def main():
         
         print("✅ LLM connection successful!")
         
-        # Create MCP client
+        # Create MCP client using centralized configuration
+        from configurations.config import config
+        llm_config = config.get_llm_config()
+        
+        if llm_config["client_type"] == "custom":
+            print(f"🔗 Using custom OpenAI endpoint: {llm_config['base_url']}")
+        else:
+            print("🔗 Using default OpenAI endpoint")
+        
         client = OpenAIMCPClient()
         
         # Test MCP server connection

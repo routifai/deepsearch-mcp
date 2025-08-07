@@ -128,26 +128,40 @@ class OpenAIClient(LLMClientInterface):
 _global_client: Optional[LLMClientInterface] = None
 
 def get_llm_client() -> LLMClientInterface:
-    """Get the global LLM client instance"""
+    """Get the global LLM client instance using centralized configuration"""
     global _global_client
     
     if _global_client is None:
-        _global_client = create_default_client()
+        # Import config here to avoid circular imports
+        from configurations.config import config
+        llm_config = config.get_llm_config()
+        
+        if llm_config["client_type"] == "custom" and llm_config["base_url"]:
+            _global_client = create_custom_client(
+                base_url=llm_config["base_url"],
+                model=llm_config["model"],
+                api_key=llm_config["api_key"]
+            )
+        else:
+            _global_client = create_default_client(model=llm_config["model"])
     
     return _global_client
 
 def create_default_client(model: str = "gpt-4o-mini") -> OpenAIClient:
     """Create default OpenAI client"""
-    return OpenAIClient(model=model)
+    from configurations.config import config
+    return OpenAIClient(api_key=config.OPENAI_API_KEY, model=model)
 
 def create_custom_client(base_url: str, model: str = "gpt-4o-mini", api_key: str = None) -> OpenAIClient:
     """Create custom OpenAI client with custom base URL"""
+    from configurations.config import config
+    api_key = api_key or config.OPENAI_API_KEY
     client = OpenAIClient(api_key=api_key, model=model)
     
-    # Modify the client to use custom base URL
-    if hasattr(client, '_sync_client') and client._sync_client:
+    # Set custom base URL for both sync and async clients
+    if client._sync_client:
         client._sync_client.base_url = base_url
-    if hasattr(client, '_async_client') and client._async_client:
+    if client._async_client:
         client._async_client.base_url = base_url
     
     logger.info(f"Created custom OpenAI client with base URL: {base_url}")

@@ -1,223 +1,116 @@
-# DeepSearch MCP Server
+# DeepSearch MCP
 
-A production-ready Model Context Protocol (MCP) server that provides intelligent web search capabilities with AI-powered query analysis, automatic content extraction, and comprehensive deep research functionality.
+Advanced web crawling and content extraction using MCP (Model Context Protocol).
 
-## 🚀 Features
+## Features
 
-- **AI-Powered Query Analysis**: Automatically determines optimal search strategies
-- **Multi-Provider Search**: Support for SerpAPI and Google Custom Search
-- **Intelligent Content Extraction**: Advanced web scraping with site-specific optimizations
-- **Deep Research Capabilities**: Comprehensive crawling with AI-powered link discovery
-- **Memory-Safe Caching**: TTL-based caching with size limits to prevent memory leaks
-- **Resource Pooling**: Browser instance pooling for efficient resource management
-- **Production-Ready**: Comprehensive error handling, logging, and monitoring
-- **Temporal Context Awareness**: Automatic handling of current vs historical information
+- **Intelligent Deep Crawling**: Uses Crawl4AI with built-in link extraction
+- **Multi-Strategy Search**: Combines direct, enhanced, and academic search
+- **Concurrent Processing**: Efficient batch processing with configurable concurrency
+- **Smart Link Scoring**: Advanced relevance scoring for intelligent crawling
+- **Comprehensive Statistics**: Detailed metrics and performance tracking
 
-## 🏗️ Architecture
+## Installation
 
-```
-server.py (MCP Entry Point)
-    ↓
-search_orchestrator.py (Main Logic)
-    ↓
-├── query_analyzer.py (AI Analysis)
-├── search_engine.py (Search Providers)
-├── deep_search.py (Deep Research)
-└── web_fetcher.py (Content Extraction)
-    ↓
-├── browser_pool.py (Resource Management)
-├── cache.py (Memory-Safe Caching)
-└── config.py (Configuration)
-```
-
-## 📦 Installation
-
-1. **Clone the repository**
-```bash
-git clone <repository-url>
-cd deepsearch-mcp
-```
-
-2. **Create and activate virtual environment**
-```bash
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-```
-
-3. **Install dependencies**
 ```bash
 pip install -r requirements.txt
 ```
 
-4. **Configure environment**
+## Configuration
+
+### Environment Variables
+
+Create a `.env` file with your configuration:
+
 ```bash
-cp .env.example .env
-# Edit .env with your API keys
+# OpenAI Configuration
+OPENAI_API_KEY=your-openai-api-key
+OPENAI_BASE_URL=https://your-custom-endpoint.com/v1  # Optional: for custom endpoints
+OPENAI_MODEL=gpt-4o-mini
+LLM_CLIENT_TYPE=default  # or "custom" for custom endpoints
+
+# Search API Configuration
+SERPAPI_KEY=your-serpapi-key
+GOOGLE_API_KEY=your-google-api-key
+GOOGLE_CSE_ID=your-google-cse-id
+
+# Server Configuration
+SERVER_HOST=127.0.0.1
+SERVER_PORT=8000
+
+# Performance Settings
+MAX_CONCURRENT=3
+TIMEOUT_SECONDS=30
 ```
 
-5. **Required API Keys**
-- **OpenAI API Key** (required for query analysis and deep search)
-- **SerpAPI Key** OR **Google Custom Search API + CSE ID** (for search)
+### Centralized LLM Configuration
 
-## ⚙️ Configuration
+The system uses centralized LLM configuration that's shared across all components:
 
-All configuration is managed through environment variables. See `.env.example` for all available options.
+- **Default OpenAI**: Uses standard OpenAI API
+- **Custom Endpoints**: Supports custom OpenAI-compatible endpoints
+- **Automatic Detection**: Automatically detects and uses the appropriate configuration
 
-### Key Settings:
+#### Using Custom Endpoints
 
-- `MAX_CONCURRENT=3` - Maximum concurrent operations
-- `MAX_CACHE_SIZE=1000` - Cache size limit (prevents memory leaks)
-- `TIMEOUT_SECONDS=30` - Request timeout
-- `BROWSER_POOL_SIZE=3` - Browser instance pool size
-- `LOG_LEVEL=INFO` - Logging level (DEBUG, INFO, WARNING, ERROR)
+To use a custom OpenAI-compatible endpoint:
 
-## 🚀 Usage
+1. Set environment variables:
+```bash
+export OPENAI_BASE_URL=https://your-custom-endpoint.com/v1
+export LLM_CLIENT_TYPE=custom
+export OPENAI_API_KEY=your-api-key
+```
+
+2. All components will automatically use the custom endpoint:
+   - Client chat interface
+   - Query analysis
+   - Deep search operations
+
+## Usage
 
 ### Start the Server
+
 ```bash
 python server.py
 ```
 
-### MCP Tools
+### Use the Client
 
-#### `web_search`
-Intelligent web search with automatic content fetching:
+```bash
+python client.py
+```
+
+### Deep Search Examples
+
 ```python
-result = await web_search(
-    query="current president of France",
-    category="general",  # auto, news, academic, technical, etc.
-    num_results=5
-)
+from tools.deep_search import deep_search_tool
+
+# Standard search
+result = await deep_search_tool.execute_deep_search("Python tutorials")
+
+# Intensive search
+result = await deep_search_tool.execute_deep_search("AI research papers", mode="intensive")
+
+# Ultra search
+result = await deep_search_tool.execute_deep_search("Machine learning trends", mode="ultra")
 ```
 
-#### `fetch_url`
-Direct URL content extraction:
-```python
-content = await fetch_url(
-    url="https://example.com/article",
-    mode="partial"  # snippet, partial, complete
-)
-```
+## Architecture
 
-#### `deep_search`
-Comprehensive research with AI-powered link discovery:
-```python
-report = await deep_search(
-    query="climate change impact on agriculture",
-    mode="intensive",  # standard, intensive, ultra
-    max_pages=20
-)
-```
+- **`configurations/`**: Centralized configuration management
+- **`tools/`**: Core crawling and search tools
+- **`agents/`**: LLM integration and query analysis
+- **`client.py`**: Interactive MCP client
+- **`server.py`**: FastMCP server implementation
 
-### HTTP Endpoints
+## Performance
 
-- **MCP Endpoint**: `http://127.0.0.1:8000/mcp`
-- **Health Check**: `http://127.0.0.1:8000/health`
-- **Server Info**: `http://127.0.0.1:8000/`
+- **Concurrent Crawling**: Configurable concurrency (3-8 crawlers)
+- **Intelligent Caching**: URL and analysis caching for efficiency
+- **Smart Filtering**: Automatic filtering of low-quality links
+- **Depth Control**: Configurable crawl depth (2-4 levels)
 
-## 🔍 Search Categories
-
-- `general`: Standard web search
-- `news`: News articles and current events
-- `academic`: Research papers and scholarly content
-- `technical`: Documentation and programming resources
-- `shopping`: Product information and prices
-- `images`: Image search
-- `local`: Location-based results
-
-## 🔬 Deep Search Modes
-
-- `standard`: Basic deep research with moderate crawling
-- `intensive`: Comprehensive analysis with extensive link discovery
-- `ultra`: Maximum depth research with AI-powered content prioritization
-
-## 📊 Monitoring
-
-### Health Check Response:
-```json
-{
-  "status": "healthy",
-  "components": {
-    "search_engine": { "provider": "serpapi" },
-    "browser_pool": { "available_browsers": 3 },
-    "query_analyzer": { "hit_rate": 0.85 }
-  }
-}
-```
-
-### Statistics Available:
-- Cache hit rates
-- Browser pool utilization
-- Search success rates
-- Processing times
-- Memory usage
-- Deep search performance metrics
-
-## 🛠️ Development
-
-### Run Tests:
-```bash
-pytest tests/
-```
-
-### Code Formatting:
-```bash
-black .
-```
-
-### Type Checking:
-```bash
-mypy .
-```
-
-## 🔒 Security
-
-- API keys stored in environment variables only
-- No hardcoded credentials
-- Request timeouts prevent hang attacks
-- Resource limits prevent DoS attacks
-- Input validation on all endpoints
-
-## 🐛 Troubleshooting
-
-### Common Issues:
-
-1. **"No search provider configured"**
-   - Check that either `SERPAPI_KEY` or both `GOOGLE_API_KEY` and `GOOGLE_CSE_ID` are set
-
-2. **"Browser pool exhausted"**
-   - Increase `BROWSER_POOL_SIZE` or `MAX_CONCURRENT` settings
-
-3. **"Query analysis failed"**
-   - Verify `OPENAI_API_KEY` is valid and has sufficient credits
-
-4. **High memory usage**
-   - Reduce `MAX_CACHE_SIZE` or `CACHE_TTL` settings
-
-5. **Deep search timeout**
-   - Increase `TIMEOUT_SECONDS` or reduce `max_pages` parameter
-
-### Debug Mode:
-```bash
-LOG_LEVEL=DEBUG python server.py
-```
-
-## 📝 License
+## License
 
 MIT License
-
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests for new functionality
-5. Submit a pull request
-
-## 📞 Support
-
-For issues and questions, please open a GitHub issue with:
-- Error messages
-- Configuration (without API keys)
-- Steps to reproduce
-- Expected vs actual behavior

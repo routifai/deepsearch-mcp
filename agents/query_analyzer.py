@@ -54,7 +54,10 @@ class QueryAnalyzer:
         if not config.OPENAI_API_KEY:
             raise AnalysisError("OpenAI API key not configured")
         
-        self.client = openai.OpenAI(api_key=config.OPENAI_API_KEY)
+        # Use centralized LLM client
+        from agents.llm_client import get_llm_client
+        llm_client = get_llm_client()
+        self.client = llm_client.get_sync_client()
         self.instructor_client = instructor.from_openai(self.client)
         self.cache = AnalysisCache(
             maxsize=config.MAX_CACHE_SIZE,
