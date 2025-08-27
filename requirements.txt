@@ -29,6 +29,9 @@ structlog>=23.2.0
 # Optional: For enhanced error handling
 httpx>=0.25.0
 
+# Search providers
+tavily-python>=0.3.0
+
 # Development dependencies (optional)
 pytest>=7.4.0
 pytest-asyncio>=0.21.0

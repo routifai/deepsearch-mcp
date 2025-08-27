@@ -31,6 +31,7 @@ LLM_CLIENT_TYPE=default  # or "custom" for custom endpoints
 
 # Search API Configuration
 SERPAPI_KEY=your-serpapi-key
+TAVILY_API_KEY=your-tavily-api-key
 GOOGLE_API_KEY=your-google-api-key
 GOOGLE_CSE_ID=your-google-cse-id
 
@@ -42,6 +43,22 @@ SERVER_PORT=8000
 MAX_CONCURRENT=3
 TIMEOUT_SECONDS=30
 ```
+
+### Search Providers
+
+The system supports multiple search providers with automatic fallback:
+
+- **Tavily** (Recommended): Modern AI-powered search with excellent results
+- **SerpAPI**: Google search results via SerpAPI
+- **Google CSE**: Google Custom Search Engine
+
+You only need to configure one provider to get started. The system will automatically select the best available provider.
+
+#### Getting API Keys
+
+- **Tavily**: Get a free API key from [tavily.com](https://tavily.com/)
+- **SerpAPI**: Get an API key from [serpapi.com](https://serpapi.com/)
+- **Google CSE**: Set up a Custom Search Engine at [Google Programmable Search Engine](https://programmablesearchengine.google.com/)
 
 ### Centralized LLM Configuration
 

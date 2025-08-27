@@ -48,7 +48,7 @@ class ModularSearchEngine:
         self.available_providers = config.get_available_search_providers()
         self.primary_provider = config.get_primary_search_provider()
         
-        # Log what we have available
+        # Status logging with appropriate levels
         if self.primary_provider == SearchProvider.NONE:
             logger.warning("⚠️ No search providers configured!")
         else:
@@ -101,6 +101,10 @@ class ModularSearchEngine:
                 results = await loop.run_in_executor(
                     None, self._google_cse_search, query, category, num_results
                 )
+            elif provider_to_use == SearchProvider.TAVILY:
+                results = await loop.run_in_executor(
+                    None, self._tavily_search, query, category, num_results
+                )
             else:
                 raise SearchProviderError(f"Provider {provider_to_use.value} not available")
             
@@ -128,6 +132,8 @@ class ModularSearchEngine:
                 return SearchProvider.SERPAPI
             elif preferred_provider.lower() == "google_cse" and SearchProvider.GOOGLE_CSE in self.available_providers:
                 return SearchProvider.GOOGLE_CSE
+            elif preferred_provider.lower() == "tavily" and SearchProvider.TAVILY in self.available_providers:
+                return SearchProvider.TAVILY
         
         # Fall back to primary provider
         return self.primary_provider
@@ -159,6 +165,10 @@ class ModularSearchEngine:
             elif fallback_provider == SearchProvider.GOOGLE_CSE:
                 results = await loop.run_in_executor(
                     None, self._google_cse_search, query, category, num_results
+                )
+            elif fallback_provider == SearchProvider.TAVILY:
+                results = await loop.run_in_executor(
+                    None, self._tavily_search, query, category, num_results
                 )
             else:
                 raise SearchProviderError(f"Unknown fallback provider: {fallback_provider.value}")
@@ -262,6 +272,54 @@ class ModularSearchEngine:
         except requests.exceptions.RequestException as e:
             raise SearchProviderError(f"Google CSE error: {str(e)}")
     
+    def _tavily_search(self, query: str, category: SearchCategory, num_results: int) -> List[SearchResult]:
+        """Search using Tavily API"""
+        
+        if not config.TAVILY_API_KEY:
+            raise SearchProviderError("Tavily API key not configured")
+        
+        try:
+            from tavily import TavilyClient
+            
+            # Initialize Tavily client
+            client = TavilyClient(api_key=config.TAVILY_API_KEY)
+            
+            # Map search categories to Tavily search types
+            search_type = "basic"  # default
+            if category == SearchCategory.NEWS:
+                search_type = "news"
+            elif category == SearchCategory.ACADEMIC:
+                search_type = "academic"
+            elif category == SearchCategory.IMAGES:
+                search_type = "images"
+            
+            # Prepare search parameters
+            search_params = {
+                "query": query,
+                "search_depth": "basic",
+                "include_answer": False,
+                "include_raw_content": False,
+                "include_images": category == SearchCategory.IMAGES,
+                "max_results": min(num_results, 10)
+            }
+            
+            # Add search type if not basic
+            if search_type != "basic":
+                search_params["search_type"] = search_type
+            
+            # Perform search
+            response = client.search(**search_params)
+            
+            return self._parse_tavily_results(response, category)
+            
+        except ImportError:
+            raise SearchProviderError("Tavily Python client not installed. Run: pip install tavily-python")
+        except Exception as e:
+            if "timeout" in str(e).lower():
+                raise SearchTimeoutError("Tavily request timed out")
+            else:
+                raise SearchProviderError(f"Tavily error: {str(e)}")
+    
     def _parse_serpapi_results(self, data: dict, category: SearchCategory) -> List[SearchResult]:
         """Parse SerpAPI response"""
         results = []
@@ -312,6 +370,31 @@ class ModularSearchEngine:
                     "provider": "google_cse",
                     "formatted_url": item.get("formattedUrl", ""),
                     "display_link": item.get("displayLink", "")
+                }
+            ))
+        
+        return results
+    
+    def _parse_tavily_results(self, data: dict, category: SearchCategory) -> List[SearchResult]:
+        """Parse Tavily API response"""
+        results = []
+        
+        # Extract results from Tavily response
+        items = data.get("results", [])
+        
+        for i, item in enumerate(items):
+            results.append(SearchResult(
+                title=item.get("title", ""),
+                url=item.get("url", ""),
+                snippet=item.get("content", ""),
+                rank=i + 1,
+                source="Tavily",
+                metadata={
+                    "category": category.value,
+                    "provider": "tavily",
+                    "score": item.get("score", 0),
+                    "published_date": item.get("published_date", ""),
+                    "language": item.get("language", "en")
                 }
             ))
         

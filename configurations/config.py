@@ -13,6 +13,7 @@ from enum import Enum
 class SearchProvider(Enum):
     SERPAPI = "serpapi"
     GOOGLE_CSE = "google_cse"
+    TAVILY = "tavily"
     NONE = "none"
 
 @dataclass
@@ -23,6 +24,7 @@ class Config:
     SERPAPI_KEY: str = os.getenv("SERPAPI_KEY", "")
     GOOGLE_API_KEY: str = os.getenv("GOOGLE_API_KEY", "")
     GOOGLE_CSE_ID: str = os.getenv("GOOGLE_CSE_ID", "")
+    TAVILY_API_KEY: str = os.getenv("TAVILY_API_KEY", "")
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
     
     # LLM Configuration
@@ -62,8 +64,14 @@ class Config:
     # Provider Preference (optional - system auto-detects if not set)
     PREFERRED_SEARCH_PROVIDER: str = os.getenv("PREFERRED_SEARCH_PROVIDER", "auto")
     
-    def get_available_search_providers(self) -> List[SearchProvider]:
-        """Get list of available search providers based on API keys"""
+    def __post_init__(self):
+        """Initialize computed properties after dataclass creation"""
+        self._available_providers = self._detect_providers()
+        self._primary_provider = self._select_primary_provider()
+        self._validation_status = self._validate_config()
+    
+    def _detect_providers(self) -> List[SearchProvider]:
+        """Detect available search providers based on API keys"""
         providers = []
         
         if self.SERPAPI_KEY:
@@ -72,67 +80,106 @@ class Config:
         if self.GOOGLE_API_KEY and self.GOOGLE_CSE_ID:
             providers.append(SearchProvider.GOOGLE_CSE)
         
+        if self.TAVILY_API_KEY:
+            providers.append(SearchProvider.TAVILY)
+        
         return providers
     
-    def get_primary_search_provider(self) -> SearchProvider:
-        """Get the primary search provider to use"""
-        available = self.get_available_search_providers()
-        
-        if not available:
+    def _select_primary_provider(self) -> SearchProvider:
+        """Select the primary search provider to use"""
+        if not self._available_providers:
             return SearchProvider.NONE
         
         # If user specified a preference, use it if available
-        if self.PREFERRED_SEARCH_PROVIDER.lower() == "serpapi" and SearchProvider.SERPAPI in available:
+        if self.PREFERRED_SEARCH_PROVIDER.lower() == "serpapi" and SearchProvider.SERPAPI in self._available_providers:
             return SearchProvider.SERPAPI
-        elif self.PREFERRED_SEARCH_PROVIDER.lower() == "google_cse" and SearchProvider.GOOGLE_CSE in available:
+        elif self.PREFERRED_SEARCH_PROVIDER.lower() == "google_cse" and SearchProvider.GOOGLE_CSE in self._available_providers:
             return SearchProvider.GOOGLE_CSE
+        elif self.PREFERRED_SEARCH_PROVIDER.lower() == "tavily" and SearchProvider.TAVILY in self._available_providers:
+            return SearchProvider.TAVILY
         
-        # Auto-select: prefer SerpAPI if available, otherwise use first available
-        if SearchProvider.SERPAPI in available:
+        # Auto-select: prefer Tavily if available, then SerpAPI, otherwise use first available
+        if SearchProvider.TAVILY in self._available_providers:
+            return SearchProvider.TAVILY
+        elif SearchProvider.SERPAPI in self._available_providers:
             return SearchProvider.SERPAPI
         else:
-            return available[0]
+            return self._available_providers[0]
     
-    def validate_search_config(self) -> tuple[bool, str]:
-        """Validate search configuration and return status"""
-        available = self.get_available_search_providers()
+    def _validate_config(self) -> dict:
+        """Single validation method that returns comprehensive status"""
+        status = {
+            "valid": True,
+            "errors": [],
+            "warnings": [],
+            "search": {},
+            "llm": {}
+        }
         
-        if not available:
-            return False, "No search provider configured. Please set SERPAPI_KEY or (GOOGLE_API_KEY + GOOGLE_CSE_ID)"
+        # Validate search configuration
+        if not self._available_providers:
+            status["valid"] = False
+            status["errors"].append("No search provider configured. Please set SERPAPI_KEY, TAVILY_API_KEY, or (GOOGLE_API_KEY + GOOGLE_CSE_ID)")
+            
+            # Provide specific guidance based on what's missing
+            if not self.SERPAPI_KEY and not self.TAVILY_API_KEY and not (self.GOOGLE_API_KEY and self.GOOGLE_CSE_ID):
+                status["warnings"].append("No API keys found. You need at least one search provider configured.")
+            elif self.GOOGLE_API_KEY and not self.GOOGLE_CSE_ID:
+                status["warnings"].append("Google API key found but missing GOOGLE_CSE_ID")
+            elif self.GOOGLE_CSE_ID and not self.GOOGLE_API_KEY:
+                status["warnings"].append("Google CSE ID found but missing GOOGLE_API_KEY")
+        else:
+            provider_names = [p.value for p in self._available_providers]
+            status["search"] = {
+                "available": provider_names,
+                "primary": self._primary_provider.value,
+                "count": len(self._available_providers)
+            }
+            
+            # Add helpful info about provider selection
+            if len(self._available_providers) > 1:
+                status["warnings"].append(f"Multiple providers available: {', '.join(provider_names)}. Using {self._primary_provider.value} as primary.")
         
-        primary = self.get_primary_search_provider()
-        provider_names = [p.value for p in available]
-        
-        return True, f"Search configured with {len(available)} provider(s): {', '.join(provider_names)}. Using: {primary.value}"
-    
-    def validate_llm_config(self) -> tuple[bool, str]:
-        """Validate LLM configuration"""
+        # Validate LLM configuration
         if not self.OPENAI_API_KEY:
-            return False, "OpenAI API key required for query analysis (OPENAI_API_KEY)"
+            status["valid"] = False
+            status["errors"].append("OpenAI API key required for query analysis (OPENAI_API_KEY)")
+        else:
+            status["llm"] = {
+                "configured": True,
+                "client_type": self.LLM_CLIENT_TYPE,
+                "model": self.OPENAI_MODEL
+            }
+            
+            # Check custom LLM configuration
+            if self.LLM_CLIENT_TYPE == "custom" and not self.OPENAI_BASE_URL:
+                status["valid"] = False
+                status["errors"].append("Custom LLM client requires OPENAI_BASE_URL")
+            elif self.LLM_CLIENT_TYPE == "custom":
+                status["warnings"].append(f"Using custom LLM client with base URL: {self.OPENAI_BASE_URL}")
         
-        # Validate custom base URL if specified
-        if self.LLM_CLIENT_TYPE == "custom" and not self.OPENAI_BASE_URL:
-            return False, "Custom LLM client requires OPENAI_BASE_URL"
-        
-        return True, "LLM configuration valid"
+        return status
     
-    def validate(self) -> bool:
-        """Validate overall configuration"""
-        search_valid, search_msg = self.validate_search_config()
-        llm_valid, llm_msg = self.validate_llm_config()
-        
-        if not search_valid or not llm_valid:
-            print(f"❌ Configuration Error:")
-            if not search_valid:
-                print(f"   Search: {search_msg}")
-            if not llm_valid:
-                print(f"   LLM: {llm_msg}")
-            return False
-        
-        print(f"✅ Configuration Valid:")
-        print(f"   Search: {search_msg}")
-        print(f"   LLM: {llm_msg}")
-        return True
+    # Simplified public interface
+    def get_available_search_providers(self) -> List[SearchProvider]:
+        """Get list of available search providers"""
+        return self._available_providers
+    
+    def get_primary_search_provider(self) -> SearchProvider:
+        """Get the primary search provider"""
+        return self._primary_provider
+    
+    def is_valid(self) -> bool:
+        """Check if configuration is valid"""
+        return self._validation_status["valid"]
+    
+    def get_validation_errors(self) -> List[str]:
+        """Get list of validation errors"""
+        return self._validation_status["errors"]
+    
+    def get_validation_warnings(self) -> List[str]:
+        """Get list of validation warnings"""
+        return self._validation_status.get("warnings", [])
     
     def get_knowledge_cutoff(self) -> datetime:
         """Get knowledge cutoff as datetime object"""
@@ -149,15 +196,13 @@ class Config:
     
     def get_status_info(self) -> dict:
         """Get configuration status for health checks"""
-        available_providers = self.get_available_search_providers()
-        primary_provider = self.get_primary_search_provider()
-        
         return {
             "search_providers": {
-                "available": [p.value for p in available_providers],
-                "primary": primary_provider.value,
+                "available": [p.value for p in self._available_providers],
+                "primary": self._primary_provider.value,
                 "serpapi_configured": bool(self.SERPAPI_KEY),
-                "google_cse_configured": bool(self.GOOGLE_API_KEY and self.GOOGLE_CSE_ID)
+                "google_cse_configured": bool(self.GOOGLE_API_KEY and self.GOOGLE_CSE_ID),
+                "tavily_configured": bool(self.TAVILY_API_KEY)
             },
             "llm": {
                 "configured": bool(self.OPENAI_API_KEY),
@@ -170,6 +215,11 @@ class Config:
                 "max_concurrent": self.MAX_CONCURRENT,
                 "timeout_seconds": self.TIMEOUT_SECONDS,
                 "cache_size": self.MAX_CACHE_SIZE
+            },
+            "validation": {
+                "valid": self._validation_status["valid"],
+                "errors": self._validation_status["errors"],
+                "warnings": self._validation_status.get("warnings", [])
             }
         }
 
@@ -180,13 +230,30 @@ def validate_startup_config() -> bool:
     """Validate configuration at startup with helpful messages"""
     print("🔧 Validating Configuration...")
     
-    if config.validate():
+    status = config._validation_status
+    
+    # Show warnings if any
+    if status.get("warnings"):
+        print("⚠️ Configuration Warnings:")
+        for warning in status["warnings"]:
+            print(f"   {warning}")
+        print()
+    
+    if config.is_valid():
+        print("✅ Configuration Valid:")
+        print(f"   Search: {len(status['search'].get('available', []))} provider(s) available")
+        print(f"   LLM: {status['llm'].get('model', 'Not configured')}")
         print("🎉 All systems ready!")
         return True
     else:
+        print("❌ Configuration Error:")
+        for error in config.get_validation_errors():
+            print(f"   {error}")
+        
         print("\n💡 Quick Setup Guide:")
         print("   1. For SerpAPI: Set SERPAPI_KEY in your .env file")
-        print("   2. For Google CSE: Set both GOOGLE_API_KEY and GOOGLE_CSE_ID")
-        print("   3. For LLM: Set OPENAI_API_KEY")
-        print("   4. You only need ONE search provider to get started!")
+        print("   2. For Tavily: Set TAVILY_API_KEY in your .env file")
+        print("   3. For Google CSE: Set both GOOGLE_API_KEY and GOOGLE_CSE_ID")
+        print("   4. For LLM: Set OPENAI_API_KEY")
+        print("   5. You only need ONE search provider to get started!")
         return False
