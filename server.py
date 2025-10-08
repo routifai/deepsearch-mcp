@@ -15,6 +15,7 @@ CHANGES:
 import json
 import logging
 import os
+import sys
 import asyncio
 from datetime import datetime, timedelta
 from typing import Dict, Any, Tuple
@@ -29,10 +30,11 @@ from tools.search_engine import search_engine, SearchCategory
 from tools.web_fetcher import WebFetcher
 from configurations.exceptions import handle_error, ConfigurationError
 
-# Setup logging
+# Setup logging - force stderr for stdio mode to prevent JSON-RPC interference
 logging.basicConfig(
     level=getattr(logging, config.LOG_LEVEL.upper()),
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    stream=sys.stderr  # Always log to stderr to avoid interfering with stdio MCP protocol
 )
 logger = logging.getLogger(__name__)
 
@@ -103,17 +105,55 @@ def truncate_content(content: str, max_chars: int, url: str) -> tuple[str, bool]
 # ============================================================================
 
 @mcp.tool()
+async def get_current_date(ctx: Context = None) -> str:
+    """Get the current date and year.
+    
+    IMPORTANT: LLMs do not have access to real-time date information.
+    Call this tool to get the current date when users ask about:
+    - "latest" or "recent" products/news/events
+    - "current" information
+    - "today", "this year", "this month"
+    - Any time-sensitive queries
+    
+    Returns:
+        JSON with current date, year, month, and search guidance
+    """
+    from datetime import datetime
+    
+    now = datetime.now()
+    
+    result = {
+        'current_date': now.strftime('%Y-%m-%d'),
+        'current_date_long': now.strftime('%B %d, %Y'),
+        'current_year': now.year,
+        'current_month': now.strftime('%B'),
+        'current_day': now.day,
+        'day_of_week': now.strftime('%A'),
+        'timestamp': now.isoformat(),
+        'guidance': f'When searching for latest/recent information, include year {now.year} in your search query'
+    }
+    
+    if ctx:
+        await ctx.info(f"Current date: {now.strftime('%Y-%m-%d %H:%M:%S')} (Year: {now.year})")
+    
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
 async def web_search(query: str, num_results: int = 5, auto_fetch: bool = True, ctx: Context = None) -> str:
     """Search the web and automatically fetch content from results.
     
-    CURRENT CONTEXT:
-    Today's date: {datetime.now().strftime("%Y-%m-%d")}
-    Current year: {datetime.now().year}
+    oCRITICAL: DO NOT ASSUME THE CURRENT DATE OR YEAR
+    If the user asks about "latest", "recent", "current", or time-sensitive information:
+    1. FIRST call get_current_date() to get the actual current year
+    2. THEN include that year in your search query
     
-    TEMPORAL QUERIES:
-    When searching for "latest", "current", "recent", or "new" information, 
-    you MUST include the current year {datetime.now().year} in your search query to 
-    ensure results are up-to-date.
+    Example workflow:
+    - User: "what is the latest iPhone?"
+    - You: Call get_current_date() → returns 2025
+    - You: Call web_search("latest iPhone 2025 specifications")
+    
+    DO NOT search "latest iPhone 2023" or assume any year - always get current date first!
     
     AUTO-FETCHING:
     When auto_fetch=True (default), this tool will:
@@ -126,23 +166,23 @@ async def web_search(query: str, num_results: int = 5, auto_fetch: bool = True, 
     
     USAGE EXAMPLES:
     
-    🔍 SNIPPET-ONLY QUERIES (set auto_fetch=False):
+    SNIPPET-ONLY QUERIES (set auto_fetch=False):
     - "What are the top 10 companies in AI?"
     - "List of best restaurants in Paris"
     - "Recent news headlines about climate change"
     - "Compare prices of iPhone vs Samsung"
     - "What are the trending topics today?"
     
-    📄 FULL-CONTENT QUERIES (auto_fetch=True recommended):
+    FULL-CONTENT QUERIES (auto_fetch=True recommended):
     - "How does machine learning work?"
     - "Explain the process of photosynthesis"
-    - "What are the detailed steps to start a business?"
+    - "What are the latest iPhone specifications?" (Remember: call get_current_date() first!)
     - "How to implement authentication in React?"
     - "What are the health benefits of exercise?"
     
     Args:
-        query: Search query string. Include year for temporal queries.
-        num_results: Number of search results to return (1-10, default: 5)
+        query: Search query string. Include year for temporal queries (get from get_current_date()).
+        num_results: Number of search results to return (3-10, default: 5, minimum enforced: 3)
         auto_fetch: Whether to automatically fetch content (default: True)
         ctx: Context for logging and user feedback
         
@@ -155,17 +195,24 @@ async def web_search(query: str, num_results: int = 5, auto_fetch: bool = True, 
     snippet_indicators = ['list', 'top', 'best', 'compare', 'headlines', 'news', 'trending', 'prices', 'cost', 'reviews', 'ratings']
     is_likely_snippet_query = any(indicator in query_lower for indicator in snippet_indicators)
     
+    # Enforce minimum 3 results for better quality
+    original_num_results = num_results
+    num_results = min(max(3, num_results), 10)
+    
     if ctx:
-        await ctx.info(f"🔍 Searching: '{query}' ({num_results} results, auto_fetch={auto_fetch})")
+        if original_num_results < 3:
+            await ctx.info(f"Requested {original_num_results} results, but minimum is 3. Using {num_results} results.")
+        
+        await ctx.info(f"Searching: '{query}' ({num_results} results, auto_fetch={auto_fetch})")
         if is_likely_snippet_query and auto_fetch:
-            await ctx.info(f"💡 This query might work well with auto_fetch=False for faster results")
+            await ctx.info(f"This query might work well with auto_fetch=False for faster results")
     
     try:
         # Step 1: Perform search
         results = await search_engine.search(
             query=query,
             category=SearchCategory.GENERAL,
-            num_results=min(max(1, num_results), 10)
+            num_results=num_results
         )
         
         if not results:
@@ -202,7 +249,7 @@ async def web_search(query: str, num_results: int = 5, auto_fetch: bool = True, 
         # Step 2: Auto-fetch content if enabled
         if auto_fetch:
             if ctx:
-                await ctx.info(f"🌐 Auto-fetching content from URLs with size limits...")
+                await ctx.info(f"Auto-fetching content from URLs with size limits...")
             
             scraped_content = []
             successful_scrapes = 0
@@ -219,16 +266,16 @@ async def web_search(query: str, num_results: int = 5, auto_fetch: bool = True, 
                 # Check if we've hit our limits
                 if successful_scrapes >= TARGET_URLS_TO_FETCH and total_response_chars >= MAX_TOTAL_RESPONSE_SIZE * 0.8:
                     if ctx:
-                        await ctx.info(f"✅ Reached target: {successful_scrapes} URLs, {total_response_chars:,} chars")
+                        await ctx.info(f"Reached target: {successful_scrapes} URLs, {total_response_chars:,} chars")
                     break
                 
                 if total_response_chars >= MAX_TOTAL_RESPONSE_SIZE:
                     if ctx:
-                        await ctx.warning(f"⚠️ Response size limit reached ({MAX_TOTAL_RESPONSE_SIZE:,} chars)")
+                        await ctx.warning(f"Response size limit reached ({MAX_TOTAL_RESPONSE_SIZE:,} chars)")
                     break
                     
                 if ctx:
-                    await ctx.info(f"🌐 Processing {i+1}/{len(fetch_results)}: {result.url}")
+                    await ctx.info(f"Processing {i+1}/{len(fetch_results)}: {result.url}")
                 
                 try:
                     # Handle exceptions from parallel fetching
@@ -239,7 +286,7 @@ async def web_search(query: str, num_results: int = 5, auto_fetch: bool = True, 
                             'error': str(content)
                         })
                         if ctx:
-                            await ctx.warning(f"❌ Fetching failed: {str(content)}")
+                            await ctx.warning(f"Fetching failed: {str(content)}")
                         continue
                     
                     # Check if scraping was successful
@@ -291,7 +338,7 @@ async def web_search(query: str, num_results: int = 5, auto_fetch: bool = True, 
                         
                         if ctx:
                             truncate_info = " (truncated)" if was_truncated else ""
-                            await ctx.info(f"✅ Fetched {content_length:,} chars (~{estimated_tokens:,} tokens){truncate_info}")
+                            await ctx.info(f"Fetched {content_length:,} chars (~{estimated_tokens:,} tokens){truncate_info}")
                     else:
                         failed_urls.append({
                             'url': result.url,
@@ -299,7 +346,7 @@ async def web_search(query: str, num_results: int = 5, auto_fetch: bool = True, 
                             'error': 'Insufficient content or error'
                         })
                         if ctx:
-                            await ctx.warning(f"⚠️ Failed to fetch sufficient content")
+                            await ctx.warning(f"Failed to fetch sufficient content")
                             
                 except Exception as e:
                     failed_urls.append({
@@ -308,7 +355,7 @@ async def web_search(query: str, num_results: int = 5, auto_fetch: bool = True, 
                         'error': str(e)
                     })
                     if ctx:
-                        await ctx.warning(f"❌ Processing failed: {str(e)}")
+                        await ctx.warning(f"Processing failed: {str(e)}")
             
             # Update response with scraped content
             response['scraped_content'] = scraped_content
@@ -325,15 +372,15 @@ async def web_search(query: str, num_results: int = 5, auto_fetch: bool = True, 
             
             if successful_scrapes >= TARGET_URLS_TO_FETCH:
                 if ctx:
-                    await ctx.info(f"✅ Successfully fetched {successful_scrapes} URLs (~{total_response_chars // 4:,} tokens)")
+                    await ctx.info(f"Successfully fetched {successful_scrapes} URLs (~{total_response_chars // 4:,} tokens)")
             else:
                 if ctx:
-                    await ctx.warning(f"⚠️ Only fetched {successful_scrapes} URLs (target: {TARGET_URLS_TO_FETCH})")
+                    await ctx.warning(f"Only fetched {successful_scrapes} URLs (target: {TARGET_URLS_TO_FETCH})")
         else:
             response['next_steps'] = "Call fetch_url() on relevant URLs to get full content"
         
         if ctx:
-            await ctx.info(f"✅ Search completed: {len(results)} results")
+            await ctx.info(f"Search completed: {len(results)} results")
         
         logger.info(f"Search completed: {len(results)} results")
         return json.dumps(response, indent=2)
@@ -343,7 +390,7 @@ async def web_search(query: str, num_results: int = 5, auto_fetch: bool = True, 
         logger.error(f"Search failed: {error_msg}")
         
         if ctx:
-            await ctx.error(f"❌ Search failed: {error_msg}")
+            await ctx.error(f"Search failed: {error_msg}")
         
         return json.dumps({
             'query': query,
@@ -360,17 +407,21 @@ async def fetch_url(url: str, ctx: Context = None) -> str:
     Retrieves full content from a webpage, extracting clean readable text
     from HTML. Use this after web_search() to get detailed information.
     
+    TEMPORAL NOTE: If analyzing time-sensitive content, consider calling 
+    get_current_date() first to understand the temporal context.
+    
     CONTENT LIMITS:
     Content is automatically truncated to 25k characters (≈6k tokens) to ensure
     responses stay under size limits. For full content, visit the URL directly.
     
     TOOL CHAINING PATTERN:
     Standard workflow:
-    1. web_search(query) returns URLs
-    2. fetch_url(url1) gets first source content
-    3. fetch_url(url2) gets second source for verification
-    4. fetch_url(url3) gets additional perspective if needed
-    5. Synthesize comprehensive answer from all sources
+    1. (Optional) get_current_date() if dealing with time-sensitive queries
+    2. web_search(query) returns URLs
+    3. fetch_url(url1) gets first source content
+    4. fetch_url(url2) gets second source for verification
+    5. fetch_url(url3) gets additional perspective if needed
+    6. Synthesize comprehensive answer from all sources
     
     Args:
         url: Complete URL to fetch (must be valid HTTP/HTTPS URL)
@@ -381,14 +432,14 @@ async def fetch_url(url: str, ctx: Context = None) -> str:
     """
     
     if ctx:
-        await ctx.info(f"🌐 Fetching: {url}")
+        await ctx.info(f"Fetching: {url}")
     
     try:
         # Check cache first
         cached = content_cache.get(url)
         if cached:
             if ctx:
-                await ctx.info(f"📦 Using cached content")
+                await ctx.info(f"Using cached content")
             return json.dumps({'url': url, 'success': True, 'cached': True, 'content': cached}, indent=2)
         
         content = await web_fetcher.fetch_url(url, mode="partial")
@@ -411,7 +462,7 @@ async def fetch_url(url: str, ctx: Context = None) -> str:
         
         if ctx:
             truncate_info = f" (truncated from {len(content):,})" if was_truncated else ""
-            await ctx.info(f"✅ Fetched {len(truncated_content):,} characters{truncate_info}")
+            await ctx.info(f"Fetched {len(truncated_content):,} characters{truncate_info}")
         
         logger.info(f"Fetch completed: {len(truncated_content)} characters")
         return json.dumps(response, indent=2)
@@ -421,7 +472,7 @@ async def fetch_url(url: str, ctx: Context = None) -> str:
         logger.error(f"Fetch failed: {error_msg}")
         
         if ctx:
-            await ctx.error(f"❌ Fetch failed: {error_msg}")
+            await ctx.error(f"Fetch failed: {error_msg}")
         
         return json.dumps({
             'url': url,
@@ -436,7 +487,7 @@ async def health(ctx: Context = None) -> str:
     """Check server health and status"""
     
     if ctx:
-        await ctx.info("🔍 Checking server health...")
+        await ctx.info("Checking server health...")
     
     try:
         search_status = search_engine.get_status()
@@ -469,7 +520,7 @@ async def health(ctx: Context = None) -> str:
         }
         
         if ctx:
-            await ctx.info("✅ Server is healthy")
+            await ctx.info("Server is healthy")
         
         return json.dumps(health_data, indent=2)
         
@@ -477,7 +528,7 @@ async def health(ctx: Context = None) -> str:
         logger.error(f"Health check failed: {e}")
         
         if ctx:
-            await ctx.error(f"❌ Health check failed: {e}")
+            await ctx.error(f"Health check failed: {e}")
         
         return json.dumps({
             'status': 'degraded',
@@ -491,7 +542,7 @@ async def get_server_info(ctx: Context = None) -> str:
     """Get server information and capabilities"""
     
     if ctx:
-        await ctx.info("📋 Getting server information...")
+        await ctx.info("Getting server information...")
     
     provider_info = config.get_status_info()
     primary_provider = provider_info["search_providers"]["primary"]
@@ -503,6 +554,10 @@ async def get_server_info(ctx: Context = None) -> str:
         'description': 'Modern FastMCP 2.x server with Context support and smart content limits',
         'philosophy': 'Simple tools, not autonomous agents',
         'tools': [
+            {
+                'name': 'get_current_date',
+                'description': 'Get current date/year - MUST call this before searching for latest/recent information'
+            },
             {
                 'name': 'web_search',
                 'description': 'Search the web and automatically fetch content from at least 5 URLs with smart truncation'
@@ -520,6 +575,7 @@ async def get_server_info(ctx: Context = None) -> str:
                 'description': 'Get server information and capabilities'
             }
         ],
+        'important_usage_note': 'DO NOT ASSUME current date/year. Always call get_current_date() first when dealing with time-sensitive queries.',
         'search_providers': {
             'primary': primary_provider,
             'available': available_providers
@@ -531,6 +587,7 @@ async def get_server_info(ctx: Context = None) -> str:
             'estimated_max_tokens': MAX_TOTAL_RESPONSE_SIZE // 4
         },
         'features': [
+            'Temporal awareness via get_current_date() tool',
             'Context-aware logging and user feedback',
             'Structured JSON responses',
             'Multi-provider search support',
@@ -546,7 +603,7 @@ async def get_server_info(ctx: Context = None) -> str:
     }
     
     if ctx:
-        await ctx.info("✅ Server info retrieved")
+        await ctx.info("Server info retrieved")
     
     return json.dumps(server_info, indent=2)
 
@@ -573,9 +630,10 @@ if __name__ == "__main__":
         available_providers = provider_info["search_providers"]["available"]
         
         logger.info(f"Search: {', '.join(available_providers)} (primary: {primary_provider})")
-        logger.info("Tools: web_search (auto-fetch), fetch_url, health, get_server_info")
+        logger.info("Tools: get_current_date, web_search (auto-fetch), fetch_url, health, get_server_info")
         logger.info(f"Limits: {MAX_CONTENT_PER_URL:,} chars/URL, {MAX_TOTAL_RESPONSE_SIZE:,} chars total")
         logger.info("Philosophy: Simple tools, not autonomous agents")
+        logger.info("Temporal Awareness: LLM must call get_current_date() for time-sensitive queries")
         logger.info("=" * 80)
     
     try:

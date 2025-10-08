@@ -62,25 +62,25 @@ def handle_error(error: Exception, context: str = "") -> str:
     context_prefix = f"[{context}] " if context else ""
     
     if isinstance(error, SearchTimeoutError):
-        return f"⏱️ {context_prefix}Search timed out. Please try again with a simpler query."
+        return f"{context_prefix}Search timed out. Please try again with a simpler query."
     
     elif isinstance(error, SearchProviderError):
-        return f"🔍 {context_prefix}Search service unavailable. Please try again later."
+        return f"{context_prefix}Search service unavailable. Please try again later."
     
     elif isinstance(error, FetchTimeoutError):
-        return f"🌐 {context_prefix}Content fetching timed out. Some URLs may be unavailable."
+        return f"{context_prefix}Content fetching timed out. Some URLs may be unavailable."
     
     elif isinstance(error, ContentExtractionError):
-        return f"📄 {context_prefix}Could not extract content from the webpage."
+        return f"{context_prefix}Could not extract content from the webpage."
     
     elif isinstance(error, LLMError):
-        return f"🧠 {context_prefix}Query analysis failed. Please try rephrasing your query."
+        return f"{context_prefix}Query analysis failed. Please try rephrasing your query."
     
     elif isinstance(error, ResourceExhaustionError):
-        return f"⚠️ {context_prefix}System overloaded. Please try again in a moment."
+        return f"{context_prefix}System overloaded. Please try again in a moment."
     
     elif isinstance(error, ConfigurationError):
-        return f"⚙️ {context_prefix}Server configuration error. Please contact administrator."
+        return f"{context_prefix}Server configuration error. Please contact administrator."
     
     else:
-        return f"❌ {context_prefix}Unexpected error: {str(error)}"
+        return f"{context_prefix}Unexpected error: {str(error)}"
