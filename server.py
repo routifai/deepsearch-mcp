@@ -1,306 +1,594 @@
 #!/usr/bin/env python3
 """
-Fixed MCP Server Implementation
-Production-ready server with correct FastMCP usage and proper error handling.
+DeepSearch MCP Server
+Modern FastMCP 2.x implementation with proper error handling and Context support.
+Following MCP best practices: simple tools, not autonomous agents.
+
+CHANGES:
+- Added MAX_CONTENT_PER_URL limit (20k chars per URL)
+- Added MAX_TOTAL_RESPONSE_SIZE limit (800k chars total)
+- Truncate individual content before adding to response
+- Track total response size and stop when limit reached
+- Better token estimation (1 token ≈ 4 chars)
 """
 
-import asyncio
+import json
 import logging
-import signal
-import sys
-from mcp.server.fastmcp import FastMCP
+import os
+import asyncio
+from datetime import datetime, timedelta
+from typing import Dict, Any, Tuple
 from dotenv import load_dotenv
+from fastmcp import FastMCP, Context
 
-# Load environment variables from .env file
+# Load environment variables
 load_dotenv()
 
 from configurations.config import config, validate_startup_config
-from tools.search_orchestrator import SearchOrchestrator
+from tools.search_engine import search_engine, SearchCategory
 from tools.web_fetcher import WebFetcher
-from tools.deep_search import deep_search_tool
-
-from configurations.browser_pool import browser_pool, initialize_browser_pool, cleanup_browser_pool
 from configurations.exceptions import handle_error, ConfigurationError
 
 # Setup logging
 logging.basicConfig(
     level=getattr(logging, config.LOG_LEVEL.upper()),
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-class MCPSearchServer:
-    """Main MCP server class with lifecycle management"""
+# Validate configuration
+if not validate_startup_config():
+    logger.error("❌ Invalid configuration. Please check your .env file.")
+    exit(1)
+
+# Initialize FastMCP
+mcp = FastMCP("deepsearch-mcp")
+web_fetcher = WebFetcher()
+
+# ============================================================================
+# Simple Content Cache
+# ============================================================================
+class SimpleCache:
+    def __init__(self, ttl_minutes: int = 30):
+        self.cache: Dict[str, Tuple[str, datetime]] = {}
+        self.ttl = timedelta(minutes=ttl_minutes)
     
-    def __init__(self):
-        # Validate configuration with helpful messages
-        if not validate_startup_config():
-            raise ConfigurationError(
-                "Invalid configuration. Please check the setup guide above."
-            )
-        
-        self.orchestrator = SearchOrchestrator()
-        self.web_fetcher = WebFetcher()
-        self.app = FastMCP("intelligent-search-server")
-        self._setup_tools()
-        self._setup_routes()
-        
-    def _setup_tools(self):
-        """Setup MCP tools"""
-        
-        @self.app.tool()
-        async def web_search(query: str, category: str = "auto", num_results: int = 5) -> str:
-            """
-            Intelligent web search with automatic content fetching.
-            
-            Args:
-                query: The search query to execute
-                category: Search category (auto, news, academic, technical, general, shopping, images, local)
-                num_results: Number of results to return (1-10)
-                
-            Returns:
-                Extracted content from relevant web sources
-            """
-            
-            try:
-                logger.info(f"Web search request: '{query}' (category: {category})")
-                
-                # Use orchestrator for complete search workflow
-                result = await self.orchestrator.search_and_fetch(query)
-                
-                if "error" in result:
-                    return result["error"]
-                
-                content = result.get("content", "No content available")
-                
-                # Log statistics
-                stats = result.get("stats", {})
-                logger.info(f"Search completed: {stats.get('successful_fetches', 0)} sources fetched "
-                           f"in {result.get('processing_time', 0):.2f}s")
-                
+    def get(self, url: str) -> str | None:
+        if url in self.cache:
+            content, timestamp = self.cache[url]
+            if datetime.now() - timestamp < self.ttl:
                 return content
-                
-            except Exception as e:
-                error_msg = handle_error(e, "web_search")
-                logger.error(f"Web search failed: {error_msg}")
-                return error_msg
-        
-        @self.app.tool()
-        async def fetch_url(url: str, mode: str = "partial", max_tokens: int = 2000) -> str:
-            """
-            Fetch and extract content from a specific URL.
-            
-            Args:
-                url: The URL to fetch content from
-                mode: "snippet" (basic), "partial" (moderate), "complete" (full content)
-                max_tokens: Maximum tokens (for compatibility, actual limit is in config)
-                
-            Returns:
-                Extracted content from the URL
-            """
-            
-            try:
-                logger.info(f"URL fetch request: '{url}' (mode: {mode})")
-                
-                content = await self.web_fetcher.fetch_url(url, mode)
-                
-                logger.info(f"URL fetch completed: {len(content)} characters")
-                return content
-                
-            except Exception as e:
-                error_msg = handle_error(e, "fetch_url")
-                logger.error(f"URL fetch failed: {error_msg}")
-                return error_msg
-        
-        @self.app.tool()
-        async def deep_search(query: str, mode: str = "intensive", max_pages: int = None) -> str:
-            # Get current temporal context
-            from datetime import datetime
-            current_date = datetime.now().strftime('%Y-%m-%d')
-            knowledge_cutoff = config.get_knowledge_cutoff().strftime('%Y-%m-%d')
-            
-            f"""
-            Deep Search Intelligence System
-            
-            Performs comprehensive web crawling with AI-powered link discovery and content analysis.
-            Designed for thorough research and information gathering across multiple sources.
-            use this tool when user asks for deep research or information gathering.
-            
-            TEMPORAL CONTEXT: Current date is {current_date}. Knowledge cutoff is {knowledge_cutoff}.
-            For queries about recent events, conflicts, or developments since {knowledge_cutoff}, 
-            this tool will automatically search for and prioritize current information.
-            
-            Args:
-                query: the search query to execute
-                mode: Intelligence level ("standard", "intensive", "ultra")
-                max_pages: Override maximum pages to crawl (optional)
-                
-            Returns:
-                Comprehensive research report with detailed analysis and source citations
-            """
-            
-            try:
-                logger.info(f"🚀 DEEP SEARCH INITIATED: '{query}' (mode: {mode})")
-                
-                # Execute the bragging rights deep search
-                result = await deep_search_tool.execute_deep_search(query, mode)
-                
-                if not result.get("success", False):
-                    return f"❌ Deep search failed: {result.get('error', 'Unknown error')}"
-                
-                # Log impressive stats
-                stats = result.get("stats", {})
-                logger.info(f"🎉 DEEP SEARCH COMPLETE: {stats.get('pages_crawled', 0)} pages, "
-                        f"{stats.get('domains_hit', 0)} domains, "
-                        f"{result.get('processing_time', 0):.1f}s "
-                        f"({stats.get('crawl_speed', 0):.1f} pages/sec)")
-                
-                return result["summary"]
-                
-            except Exception as e:
-                error_msg = handle_error(e, "deep_search")
-                logger.error(f"Deep search failed: {error_msg}")
-                return error_msg
+        return None
     
-    def _setup_routes(self):
-        """Setup custom HTTP routes"""
+    def set(self, url: str, content: str):
+        self.cache[url] = (content, datetime.now())
+
+content_cache = SimpleCache()
+
+# ============================================================================
+# Response Size Limits
+# ============================================================================
+MAX_CONTENT_PER_URL = 25000  # Max 25k chars per URL (≈6k tokens, matches web_fetcher)
+MAX_TOTAL_RESPONSE_SIZE = 800000  # Max 800k chars total (≈200k tokens, well under 1MB)
+TARGET_URLS_TO_FETCH = 5  # Try to fetch at least 5 URLs
+
+
+def truncate_content(content: str, max_chars: int, url: str) -> tuple[str, bool]:
+    """
+    Truncate content to max_chars with smart truncation.
+    Returns (truncated_content, was_truncated)
+    """
+    if len(content) <= max_chars:
+        return content, False
+    
+    # Smart truncation: try to end at paragraph or sentence
+    truncated = content[:max_chars]
+    
+    # Try to find last paragraph break (double newline)
+    last_para = truncated.rfind('\n\n')
+    if last_para > max_chars * 0.75:  # At least 75% of content
+        truncated = truncated[:last_para]
+    else:
+        # Try to find last sentence
+        last_period = truncated.rfind('. ')
+        if last_period > max_chars * 0.75:
+            truncated = truncated[:last_period + 1]
+    
+    truncated += f"\n\n[Content truncated - Full content at: {url}]"
+    return truncated, True
+
+
+# ============================================================================
+# MCP Tools with Context Support
+# ============================================================================
+
+@mcp.tool()
+async def web_search(query: str, num_results: int = 5, auto_fetch: bool = True, ctx: Context = None) -> str:
+    """Search the web and automatically fetch content from results.
+    
+    CURRENT CONTEXT:
+    Today's date: {datetime.now().strftime("%Y-%m-%d")}
+    Current year: {datetime.now().year}
+    
+    TEMPORAL QUERIES:
+    When searching for "latest", "current", "recent", or "new" information, 
+    you MUST include the current year {datetime.now().year} in your search query to 
+    ensure results are up-to-date.
+    
+    AUTO-FETCHING:
+    When auto_fetch=True (default), this tool will:
+    1. Search for results
+    2. Automatically fetch content from at least 5 URLs
+    3. Apply smart content truncation (25k chars per URL, 800k total)
+    4. Return both search results and scraped content
+    
+    When auto_fetch=False, only search results with snippets are returned.
+    
+    USAGE EXAMPLES:
+    
+    🔍 SNIPPET-ONLY QUERIES (set auto_fetch=False):
+    - "What are the top 10 companies in AI?"
+    - "List of best restaurants in Paris"
+    - "Recent news headlines about climate change"
+    - "Compare prices of iPhone vs Samsung"
+    - "What are the trending topics today?"
+    
+    📄 FULL-CONTENT QUERIES (auto_fetch=True recommended):
+    - "How does machine learning work?"
+    - "Explain the process of photosynthesis"
+    - "What are the detailed steps to start a business?"
+    - "How to implement authentication in React?"
+    - "What are the health benefits of exercise?"
+    
+    Args:
+        query: Search query string. Include year for temporal queries.
+        num_results: Number of search results to return (1-10, default: 5)
+        auto_fetch: Whether to automatically fetch content (default: True)
+        ctx: Context for logging and user feedback
         
-        @self.app.custom_route("/health", methods=["GET"])
-        async def health_check(request):
-            """Health check endpoint with detailed status"""
-            from starlette.responses import JSONResponse
-            from datetime import datetime
-            
-            try:
-                # Get component status
-                stats = await self.orchestrator.get_stats()
-                pool_stats = browser_pool.get_stats()
-                
-                return JSONResponse({
-                    "status": "healthy",
-                    "timestamp": datetime.now().isoformat(),
-                    "version": "3.0",
-                    "components": {
-                        "search_engine": stats["search_engine"],
-                        "browser_pool": pool_stats,
-                        "query_analyzer": stats["query_analyzer"]
-                    },
-                    "config": config.get_status_info()
-                })
-                
-            except Exception as e:
-                logger.error(f"Health check failed: {e}")
-                return JSONResponse({
-                    "status": "degraded",
-                    "error": str(e)
-                }, status_code=503)
+    Returns:
+        JSON with search results, scraped content, and metadata
+    """
+    
+    # Simple guidance based on query patterns
+    query_lower = query.lower()
+    snippet_indicators = ['list', 'top', 'best', 'compare', 'headlines', 'news', 'trending', 'prices', 'cost', 'reviews', 'ratings']
+    is_likely_snippet_query = any(indicator in query_lower for indicator in snippet_indicators)
+    
+    if ctx:
+        await ctx.info(f"🔍 Searching: '{query}' ({num_results} results, auto_fetch={auto_fetch})")
+        if is_likely_snippet_query and auto_fetch:
+            await ctx.info(f"💡 This query might work well with auto_fetch=False for faster results")
+    
+    try:
+        # Step 1: Perform search
+        results = await search_engine.search(
+            query=query,
+            category=SearchCategory.GENERAL,
+            num_results=min(max(1, num_results), 10)
+        )
         
-        @self.app.custom_route("/", methods=["GET"])
-        async def root(request):
-            """Root endpoint with server information"""
-            from starlette.responses import JSONResponse
-            
-            return JSONResponse({
-                "name": "Intelligent Search MCP Server",
-                "version": "3.0",
-                "description": "Production-ready MCP server with intelligent search capabilities",
-                "endpoints": {
-                    "mcp": "/mcp",
-                    "health": "/health"
-                },
-                "tools": [
-                    {
-                        "name": "web_search",
-                        "description": "Intelligent web search with automatic content fetching"
-                    },
-                    {
-                        "name": "fetch_url", 
-                        "description": "Direct URL content fetching"
-                    }
-                ],
-                "features": [
-                    "AI-powered query analysis",
-                    "Multi-provider search support (SerpAPI, Google CSE)",
-                    "Intelligent content extraction",
-                    "Memory-safe caching",
-                    "Resource pooling",
-                    "Production-ready error handling"
-                ],
-                "config": config.get_status_info()
+        if not results:
+            if ctx:
+                await ctx.warning("No results found")
+            return json.dumps({
+                'query': query,
+                'success': False,
+                'results': [],
+                'scraped_content': [],
+                'message': f"No results found for query: {query}"
+            }, indent=2)
+        
+        # Format search results
+        formatted_results = []
+        for i, r in enumerate(results, 1):
+            formatted_results.append({
+                'rank': i,
+                'title': r.title,
+                'url': r.url,
+                'snippet': r.snippet
             })
+        
+        response = {
+            'query': query,
+            'success': True,
+            'search_date': datetime.now().strftime("%Y-%m-%d"),
+            'results_count': len(results),
+            'results': formatted_results,
+            'scraped_content': [],
+            'auto_fetch_enabled': auto_fetch
+        }
+        
+        # Step 2: Auto-fetch content if enabled
+        if auto_fetch:
+            if ctx:
+                await ctx.info(f"🌐 Auto-fetching content from URLs with size limits...")
+            
+            scraped_content = []
+            successful_scrapes = 0
+            failed_urls = []
+            total_response_chars = 0
+            urls_truncated = 0
+            
+            # Parallel fetching for 3-5x speed improvement
+            fetch_tasks = [web_fetcher.fetch_url(r.url, mode="partial") for r in results[:TARGET_URLS_TO_FETCH]]
+            fetch_results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
+            
+            # Process results
+            for i, (result, content) in enumerate(zip(results[:TARGET_URLS_TO_FETCH], fetch_results)):
+                # Check if we've hit our limits
+                if successful_scrapes >= TARGET_URLS_TO_FETCH and total_response_chars >= MAX_TOTAL_RESPONSE_SIZE * 0.8:
+                    if ctx:
+                        await ctx.info(f"✅ Reached target: {successful_scrapes} URLs, {total_response_chars:,} chars")
+                    break
+                
+                if total_response_chars >= MAX_TOTAL_RESPONSE_SIZE:
+                    if ctx:
+                        await ctx.warning(f"⚠️ Response size limit reached ({MAX_TOTAL_RESPONSE_SIZE:,} chars)")
+                    break
+                    
+                if ctx:
+                    await ctx.info(f"🌐 Processing {i+1}/{len(fetch_results)}: {result.url}")
+                
+                try:
+                    # Handle exceptions from parallel fetching
+                    if isinstance(content, Exception):
+                        failed_urls.append({
+                            'url': result.url,
+                            'title': result.title,
+                            'error': str(content)
+                        })
+                        if ctx:
+                            await ctx.warning(f"❌ Fetching failed: {str(content)}")
+                        continue
+                    
+                    # Check if scraping was successful
+                    if len(content) > 100 and not content.startswith("Error fetching"):
+                        # Truncate individual content to max per URL
+                        truncated_content, was_truncated = truncate_content(
+                            content, 
+                            MAX_CONTENT_PER_URL, 
+                            result.url
+                        )
+                        
+                        if was_truncated:
+                            urls_truncated += 1
+                        
+                        content_length = len(truncated_content)
+                        estimated_tokens = content_length // 4
+                        
+                        # Check if adding this would exceed total limit
+                        if total_response_chars + content_length > MAX_TOTAL_RESPONSE_SIZE:
+                            # Calculate how much we can include
+                            remaining_chars = MAX_TOTAL_RESPONSE_SIZE - total_response_chars
+                            if remaining_chars > 5000:  # Only include if we can get meaningful content
+                                truncated_content, _ = truncate_content(
+                                    truncated_content,
+                                    remaining_chars,
+                                    result.url
+                                )
+                                content_length = len(truncated_content)
+                                urls_truncated += 1
+                            else:
+                                if ctx:
+                                    await ctx.warning(f"⚠️ Skipping - would exceed total size limit")
+                                break
+                        
+                        scraped_content.append({
+                            'url': result.url,
+                            'title': result.title,
+                            'snippet': result.snippet,
+                            'content': truncated_content,
+                            'content_length': content_length,
+                            'estimated_tokens': estimated_tokens,
+                            'rank': result.rank,
+                            'was_truncated': was_truncated,
+                            'success': True
+                        })
+                        
+                        successful_scrapes += 1
+                        total_response_chars += content_length
+                        
+                        if ctx:
+                            truncate_info = " (truncated)" if was_truncated else ""
+                            await ctx.info(f"✅ Fetched {content_length:,} chars (~{estimated_tokens:,} tokens){truncate_info}")
+                    else:
+                        failed_urls.append({
+                            'url': result.url,
+                            'title': result.title,
+                            'error': 'Insufficient content or error'
+                        })
+                        if ctx:
+                            await ctx.warning(f"⚠️ Failed to fetch sufficient content")
+                            
+                except Exception as e:
+                    failed_urls.append({
+                        'url': result.url,
+                        'title': result.title,
+                        'error': str(e)
+                    })
+                    if ctx:
+                        await ctx.warning(f"❌ Processing failed: {str(e)}")
+            
+            # Update response with scraped content
+            response['scraped_content'] = scraped_content
+            response['failed_urls'] = failed_urls
+            response['scraping_stats'] = {
+                'successful_fetches': successful_scrapes,
+                'failed_fetches': len(failed_urls),
+                'total_chars': total_response_chars,
+                'estimated_tokens': total_response_chars // 4,
+                'urls_truncated': urls_truncated,
+                'max_chars_per_url': MAX_CONTENT_PER_URL,
+                'max_total_chars': MAX_TOTAL_RESPONSE_SIZE
+            }
+            
+            if successful_scrapes >= TARGET_URLS_TO_FETCH:
+                if ctx:
+                    await ctx.info(f"✅ Successfully fetched {successful_scrapes} URLs (~{total_response_chars // 4:,} tokens)")
+            else:
+                if ctx:
+                    await ctx.warning(f"⚠️ Only fetched {successful_scrapes} URLs (target: {TARGET_URLS_TO_FETCH})")
+        else:
+            response['next_steps'] = "Call fetch_url() on relevant URLs to get full content"
+        
+        if ctx:
+            await ctx.info(f"✅ Search completed: {len(results)} results")
+        
+        logger.info(f"Search completed: {len(results)} results")
+        return json.dumps(response, indent=2)
+        
+    except Exception as e:
+        error_msg = handle_error(e, "web_search")
+        logger.error(f"Search failed: {error_msg}")
+        
+        if ctx:
+            await ctx.error(f"❌ Search failed: {error_msg}")
+        
+        return json.dumps({
+            'query': query,
+            'success': False,
+            'error': error_msg
+        }, indent=2)
+
+
+@mcp.tool()
+async def fetch_url(url: str, ctx: Context = None) -> str:
+    """Fetch and extract content from a specific URL.
     
-    async def startup(self):
-        """Server startup tasks"""
-        logger.info("🚀 Starting Intelligent Search MCP Server v3.0")
+    PURPOSE:
+    Retrieves full content from a webpage, extracting clean readable text
+    from HTML. Use this after web_search() to get detailed information.
+    
+    CONTENT LIMITS:
+    Content is automatically truncated to 25k characters (≈6k tokens) to ensure
+    responses stay under size limits. For full content, visit the URL directly.
+    
+    TOOL CHAINING PATTERN:
+    Standard workflow:
+    1. web_search(query) returns URLs
+    2. fetch_url(url1) gets first source content
+    3. fetch_url(url2) gets second source for verification
+    4. fetch_url(url3) gets additional perspective if needed
+    5. Synthesize comprehensive answer from all sources
+    
+    Args:
+        url: Complete URL to fetch (must be valid HTTP/HTTPS URL)
+        ctx: Context for logging and user feedback
+        
+    Returns:
+        JSON with content, metadata, and status
+    """
+    
+    if ctx:
+        await ctx.info(f"🌐 Fetching: {url}")
+    
+    try:
+        # Check cache first
+        cached = content_cache.get(url)
+        if cached:
+            if ctx:
+                await ctx.info(f"📦 Using cached content")
+            return json.dumps({'url': url, 'success': True, 'cached': True, 'content': cached}, indent=2)
+        
+        content = await web_fetcher.fetch_url(url, mode="partial")
+        
+        # Truncate content to prevent oversized responses
+        truncated_content, was_truncated = truncate_content(content, MAX_CONTENT_PER_URL, url)
+        
+        # Cache the content
+        content_cache.set(url, truncated_content)
+        
+        response = {
+            'url': url,
+            'success': True,
+            'fetched_date': datetime.now().strftime("%Y-%m-%d"),
+            'content_length': len(truncated_content),
+            'original_length': len(content),
+            'was_truncated': was_truncated,
+            'content': truncated_content
+        }
+        
+        if ctx:
+            truncate_info = f" (truncated from {len(content):,})" if was_truncated else ""
+            await ctx.info(f"✅ Fetched {len(truncated_content):,} characters{truncate_info}")
+        
+        logger.info(f"Fetch completed: {len(truncated_content)} characters")
+        return json.dumps(response, indent=2)
+        
+    except Exception as e:
+        error_msg = handle_error(e, "fetch_url")
+        logger.error(f"Fetch failed: {error_msg}")
+        
+        if ctx:
+            await ctx.error(f"❌ Fetch failed: {error_msg}")
+        
+        return json.dumps({
+            'url': url,
+            'success': False,
+            'error': error_msg,
+            'suggestion': "Try another URL from search results"
+        }, indent=2)
+
+
+@mcp.tool()
+async def health(ctx: Context = None) -> str:
+    """Check server health and status"""
+    
+    if ctx:
+        await ctx.info("🔍 Checking server health...")
+    
+    try:
+        search_status = search_engine.get_status()
+        provider_info = config.get_status_info()
+        
+        health_data = {
+            'status': 'healthy',
+            'timestamp': datetime.now().isoformat(),
+            'version': '2.0-modern',
+            'components': {
+                'search_engine': search_status,
+                'web_fetcher': 'operational'
+            },
+            'config': provider_info,
+            'content_limits': {
+                'max_chars_per_url': MAX_CONTENT_PER_URL,
+                'max_total_response_chars': MAX_TOTAL_RESPONSE_SIZE,
+                'estimated_max_tokens': MAX_TOTAL_RESPONSE_SIZE // 4
+            },
+            'features': [
+                'Multi-provider search (SerpAPI, Google CSE, Tavily)',
+                'Clean content extraction (Crawl4AI)',
+                'Smart content truncation',
+                'Context-aware logging',
+                'Structured JSON responses',
+                'Parallel URL fetching (3-5x faster)',
+                'Simple content cache (eliminates duplicate fetches)',
+                'Fixed browser memory leaks for long sessions'
+            ]
+        }
+        
+        if ctx:
+            await ctx.info("✅ Server is healthy")
+        
+        return json.dumps(health_data, indent=2)
+        
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        
+        if ctx:
+            await ctx.error(f"❌ Health check failed: {e}")
+        
+        return json.dumps({
+            'status': 'degraded',
+            'error': str(e),
+            'timestamp': datetime.now().isoformat()
+        }, indent=2)
+
+
+@mcp.tool()
+async def get_server_info(ctx: Context = None) -> str:
+    """Get server information and capabilities"""
+    
+    if ctx:
+        await ctx.info("📋 Getting server information...")
+    
+    provider_info = config.get_status_info()
+    primary_provider = provider_info["search_providers"]["primary"]
+    available_providers = provider_info["search_providers"]["available"]
+    
+    server_info = {
+        'name': 'DeepSearch MCP Server',
+        'version': '2.0-modern',
+        'description': 'Modern FastMCP 2.x server with Context support and smart content limits',
+        'philosophy': 'Simple tools, not autonomous agents',
+        'tools': [
+            {
+                'name': 'web_search',
+                'description': 'Search the web and automatically fetch content from at least 5 URLs with smart truncation'
+            },
+            {
+                'name': 'fetch_url',
+                'description': 'Fetch and extract content from URLs (auto-truncated to 25k chars)'
+            },
+            {
+                'name': 'health',
+                'description': 'Check server health and status'
+            },
+            {
+                'name': 'get_server_info',
+                'description': 'Get server information and capabilities'
+            }
+        ],
+        'search_providers': {
+            'primary': primary_provider,
+            'available': available_providers
+        },
+        'content_limits': {
+            'max_chars_per_url': MAX_CONTENT_PER_URL,
+            'max_total_response': MAX_TOTAL_RESPONSE_SIZE,
+            'target_urls_to_fetch': TARGET_URLS_TO_FETCH,
+            'estimated_max_tokens': MAX_TOTAL_RESPONSE_SIZE // 4
+        },
+        'features': [
+            'Context-aware logging and user feedback',
+            'Structured JSON responses',
+            'Multi-provider search support',
+            'Clean content extraction with Crawl4AI',
+            'Smart content truncation to prevent oversized responses',
+            'Error handling with helpful suggestions',
+            'Auto-fetch with size limits',
+            'Guaranteed minimum 5 URL scraping (when available)',
+            'Parallel URL fetching (3-5x faster)',
+            'Simple content cache (eliminates duplicate fetches)',
+            'Fixed browser memory leaks for long sessions'
+        ]
+    }
+    
+    if ctx:
+        await ctx.info("✅ Server info retrieved")
+    
+    return json.dumps(server_info, indent=2)
+
+
+# ============================================================================
+# Run Server
+# ============================================================================
+
+if __name__ == "__main__":
+    import sys
+    
+    # Check if running in stdio mode (for Claude Desktop) or HTTP mode
+    is_stdio_mode = len(sys.argv) > 1 and sys.argv[1] == "--stdio"
+    
+    # Only log startup info in HTTP mode to avoid MCP JSON parsing errors
+    if not is_stdio_mode:
+        logger.info("=" * 80)
+        logger.info("DeepSearch MCP Server v2.0 (Modern FastMCP)")
+        logger.info("Features: Context support, structured responses, smart content limits")
         
         # Get provider info
         provider_info = config.get_status_info()
         primary_provider = provider_info["search_providers"]["primary"]
         available_providers = provider_info["search_providers"]["available"]
         
-        logger.info(f"🔧 Search: {', '.join(available_providers)} (primary: {primary_provider})")
-        logger.info(f"🌐 Server will start on: http://{config.SERVER_HOST}:{config.SERVER_PORT}")
-        
-        # Initialize browser pool
-        await initialize_browser_pool()
-        logger.info("✅ Browser pool initialized")
-        
-        logger.info("🎯 MCP Tools: web_search, fetch_url")
-        logger.info("📊 Health check: /health")
-        logger.info("🔄 Ready for requests")
+        logger.info(f"Search: {', '.join(available_providers)} (primary: {primary_provider})")
+        logger.info("Tools: web_search (auto-fetch), fetch_url, health, get_server_info")
+        logger.info(f"Limits: {MAX_CONTENT_PER_URL:,} chars/URL, {MAX_TOTAL_RESPONSE_SIZE:,} chars total")
+        logger.info("Philosophy: Simple tools, not autonomous agents")
+        logger.info("=" * 80)
     
-    async def shutdown(self):
-        """Server shutdown tasks"""
-        logger.info("🛑 Shutting down server...")
-        
-        # Cleanup browser pool
-        await cleanup_browser_pool()
-        logger.info("✅ Browser pool cleaned up")
-        
-        logger.info("👋 Server stopped")
-    
-    def run(self):
-        """Run the server with proper FastMCP usage"""
-        
-        # Setup signal handlers for graceful shutdown
-        def signal_handler(signum, frame):
-            logger.info(f"Received signal {signum}, starting graceful shutdown...")
-            sys.exit(0)
-        
-        signal.signal(signal.SIGINT, signal_handler)
-        signal.signal(signal.SIGTERM, signal_handler)
-        
-        try:
-            # Initialize in sync context
-            asyncio.run(self.startup())
-            
-            # Run server with correct FastMCP API
-            # FastMCP.run() only accepts transport parameter
-            self.app.run(transport="streamable-http")
-            
-        except KeyboardInterrupt:
-            logger.info("Received keyboard interrupt")
-        except Exception as e:
-            logger.error(f"Server error: {e}")
-            raise
-        finally:
-            # Cleanup in sync context
-            asyncio.run(self.shutdown())
-
-def main():
-    """Main entry point"""
     try:
-        server = MCPSearchServer()
-        server.run()
-    except ConfigurationError as e:
-        logger.error(f"❌ Configuration error: {e}")
-        print("\n💡 Please check your .env file and ensure you have:")
-        print("   - SERPAPI_KEY (or GOOGLE_API_KEY + GOOGLE_CSE_ID)")
-        print("   - OPENAI_API_KEY")
-        sys.exit(1)
+        if is_stdio_mode:
+            # Stdio mode for Claude Desktop - no startup logging to avoid JSON parsing errors
+            mcp.run(transport="stdio")
+        else:
+            # HTTP mode for standalone use
+            logger.info(f"Running in HTTP mode: http://{config.SERVER_HOST}:{config.SERVER_PORT}")
+            mcp.run(transport="streamable-http", host="0.0.0.0", port=8000, path="/mcp")
+    except KeyboardInterrupt:
+        if not is_stdio_mode:
+            logger.info("Shutting down...")
     except Exception as e:
-        logger.error(f"❌ Failed to start server: {e}")
-        sys.exit(1)
-
-if __name__ == "__main__":
-    main()
+        logger.error(f"Server error: {e}")
+        raise

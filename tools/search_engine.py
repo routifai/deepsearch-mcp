@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 # Import from your structure
-from configurations.config import config, SearchProvider
+from configurations.config import config
 from configurations.exceptions import SearchError, SearchProviderError, SearchTimeoutError
 
 logger = logging.getLogger(__name__)
@@ -45,27 +45,27 @@ class ModularSearchEngine:
     
     def __init__(self):
         self.timeout = config.TIMEOUT_SECONDS
-        self.available_providers = config.get_available_search_providers()
-        self.primary_provider = config.get_primary_search_provider()
+        self.available_providers = config.get_available_providers()
+        self.primary_provider = config.get_primary_provider()
         
         # Status logging with appropriate levels
-        if self.primary_provider == SearchProvider.NONE:
+        if self.primary_provider == "none":
             logger.warning("⚠️ No search providers configured!")
         else:
-            provider_list = [p.value for p in self.available_providers]
-            logger.info(f"🔍 Search engine initialized: {', '.join(provider_list)} (primary: {self.primary_provider.value})")
+            logger.info(f"🔍 Search engine initialized: {', '.join(self.available_providers)} (primary: {self.primary_provider})")
     
     def is_available(self) -> bool:
         """Check if any search provider is available"""
-        return self.primary_provider != SearchProvider.NONE
+        return self.primary_provider != "none"
     
     def get_provider_status(self) -> Dict[str, Any]:
         """Get detailed provider status"""
         return {
-            "available_providers": [p.value for p in self.available_providers],
-            "primary_provider": self.primary_provider.value,
-            "serpapi_available": SearchProvider.SERPAPI in self.available_providers,
-            "google_cse_available": SearchProvider.GOOGLE_CSE in self.available_providers,
+            "available_providers": self.available_providers,
+            "primary_provider": self.primary_provider,
+            "serpapi_available": "serpapi" in self.available_providers,
+            "google_cse_available": "google_cse" in self.available_providers,
+            "tavily_available": "tavily" in self.available_providers,
             "total_providers": len(self.available_providers)
         }
     
@@ -87,28 +87,28 @@ class ModularSearchEngine:
         # Determine which provider to use
         provider_to_use = self._select_provider(preferred_provider)
         
-        logger.info(f"🔍 Searching with {provider_to_use.value}: '{query[:50]}...' ({category.value})")
+        logger.info(f"🔍 Searching with {provider_to_use}: '{query[:50]}...' ({category.value})")
         
         try:
             # Run search in thread pool to avoid blocking
             loop = asyncio.get_event_loop()
             
-            if provider_to_use == SearchProvider.SERPAPI:
+            if provider_to_use == "serpapi":
                 results = await loop.run_in_executor(
                     None, self._serpapi_search, query, category, num_results
                 )
-            elif provider_to_use == SearchProvider.GOOGLE_CSE:
+            elif provider_to_use == "google_cse":
                 results = await loop.run_in_executor(
                     None, self._google_cse_search, query, category, num_results
                 )
-            elif provider_to_use == SearchProvider.TAVILY:
+            elif provider_to_use == "tavily":
                 results = await loop.run_in_executor(
                     None, self._tavily_search, query, category, num_results
                 )
             else:
-                raise SearchProviderError(f"Provider {provider_to_use.value} not available")
+                raise SearchProviderError(f"Provider {provider_to_use} not available")
             
-            logger.info(f"✅ Search completed: {len(results)} results from {provider_to_use.value}")
+            logger.info(f"✅ Search completed: {len(results)} results from {provider_to_use}")
             return results
             
         except Exception as e:
@@ -117,29 +117,30 @@ class ModularSearchEngine:
                 return await self._try_fallback_provider(query, category, num_results, provider_to_use, e)
             else:
                 # No fallback available
-                logger.error(f"Search failed with only provider {provider_to_use.value}: {e}")
+                logger.error(f"Search failed with only provider {provider_to_use}: {e}")
                 if "timeout" in str(e).lower():
                     raise SearchTimeoutError(f"Search timed out for query: {query}")
                 else:
                     raise SearchProviderError(f"Search failed: {str(e)}")
     
-    def _select_provider(self, preferred_provider: Optional[str] = None) -> SearchProvider:
+    def _select_provider(self, preferred_provider: Optional[str] = None) -> str:
         """Select which provider to use for this search"""
         
         # If user specified a preference for this search, try to honor it
         if preferred_provider:
-            if preferred_provider.lower() == "serpapi" and SearchProvider.SERPAPI in self.available_providers:
-                return SearchProvider.SERPAPI
-            elif preferred_provider.lower() == "google_cse" and SearchProvider.GOOGLE_CSE in self.available_providers:
-                return SearchProvider.GOOGLE_CSE
-            elif preferred_provider.lower() == "tavily" and SearchProvider.TAVILY in self.available_providers:
-                return SearchProvider.TAVILY
+            preferred = preferred_provider.lower()
+            if preferred == "serpapi" and "serpapi" in self.available_providers:
+                return "serpapi"
+            elif preferred == "google_cse" and "google_cse" in self.available_providers:
+                return "google_cse"
+            elif preferred == "tavily" and "tavily" in self.available_providers:
+                return "tavily"
         
         # Fall back to primary provider
         return self.primary_provider
     
     async def _try_fallback_provider(self, query: str, category: SearchCategory, 
-                                   num_results: int, failed_provider: SearchProvider, 
+                                   num_results: int, failed_provider: str, 
                                    original_error: Exception) -> List[SearchResult]:
         """Try fallback provider if primary fails"""
         
@@ -153,27 +154,27 @@ class ModularSearchEngine:
         if not fallback_provider:
             raise SearchProviderError(f"No fallback available. Original error: {str(original_error)}")
         
-        logger.warning(f"🔄 Primary provider {failed_provider.value} failed, trying fallback {fallback_provider.value}")
+        logger.warning(f"🔄 Primary provider {failed_provider} failed, trying fallback {fallback_provider}")
         
         try:
             loop = asyncio.get_event_loop()
             
-            if fallback_provider == SearchProvider.SERPAPI:
+            if fallback_provider == "serpapi":
                 results = await loop.run_in_executor(
                     None, self._serpapi_search, query, category, num_results
                 )
-            elif fallback_provider == SearchProvider.GOOGLE_CSE:
+            elif fallback_provider == "google_cse":
                 results = await loop.run_in_executor(
                     None, self._google_cse_search, query, category, num_results
                 )
-            elif fallback_provider == SearchProvider.TAVILY:
+            elif fallback_provider == "tavily":
                 results = await loop.run_in_executor(
                     None, self._tavily_search, query, category, num_results
                 )
             else:
-                raise SearchProviderError(f"Unknown fallback provider: {fallback_provider.value}")
+                raise SearchProviderError(f"Unknown fallback provider: {fallback_provider}")
             
-            logger.info(f"✅ Fallback successful: {len(results)} results from {fallback_provider.value}")
+            logger.info(f"✅ Fallback successful: {len(results)} results from {fallback_provider}")
             return results
             
         except Exception as fallback_error:

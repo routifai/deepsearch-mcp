@@ -16,8 +16,8 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 from mcp.shared.exceptions import McpError
 
-# Import our centralized LLM client (using your structure)
-from agents.llm_client import get_llm_client, create_default_client, create_custom_client
+# Direct OpenAI import - no centralized LLM client needed
+import openai
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -28,10 +28,9 @@ class OpenAIMCPClient:
     def __init__(self, server_url: str = "http://localhost:8000/mcp"):
         self.server_url = server_url
         
-        # Use centralized LLM configuration
-        self.llm_client = get_llm_client()
-        self.openai_client = self.llm_client.get_async_client()
-        self.model = self.llm_client.model
+        # Direct OpenAI client initialization
+        self.openai_client = openai.AsyncOpenAI()
+        self.model = "gpt-4o-mini"  # Default model
         
         logger.info(f"MCP Client initialized with model: {self.model}")
     
@@ -71,24 +70,15 @@ class OpenAIMCPClient:
                     messages = [
                         {
                             "role": "system",
-                            "content": """You are a helpful AI assistant with access to web search and content fetching tools. 
-                            
+                            "content": """You are a helpful AI assistant with access to various tools through the MCP (Model Context Protocol) server.
+
                             CRITICAL RULE: NEVER modify, rewrite, or change user queries when calling tools. Use the exact query the user provided.
                             
-                            Available tools:
-                            - web_search: Search the web for current information
-                            - fetch_url: Fetch and extract content from specific URLs
+                            The available tools and their descriptions are provided dynamically by the MCP server. Use the tools when appropriate to help users with their requests.
                             
-                            Use these tools when users:
-                            - Ask for current information or recent events
-                            - Want to search for specific topics
-                            - Ask you to fetch content from URLs
-                            - Need information that might be time-sensitive
-                            - Request comprehensive research or analysis
-                            
-                            IMPORTANT: When calling web_search:
-                            - Use the EXACT query the user provided
-                            - Do NOT add years, dates, or modify the query
+                            IMPORTANT: When calling any tool:
+                            - Use the EXACT query/parameters the user provided
+                            - Do NOT add years, dates, or modify the user's input
                             - Do NOT rewrite or "improve" the user's query
                             - Pass the user's original words as-is
                             
@@ -171,13 +161,8 @@ class OpenAIMCPClient:
             return f"Error: {e}"
     
     async def test_connection(self) -> bool:
-        """Test connection to both LLM and MCP server"""
+        """Test connection to MCP server"""
         try:
-            # Test LLM connection
-            if not self.llm_client.is_available():
-                logger.error("LLM client not available")
-                return False
-            
             # Test MCP server connection
             async with streamablehttp_client(self.server_url) as (read_stream, write_stream, _):
                 async with ClientSession(read_stream, write_stream) as session:
@@ -198,24 +183,8 @@ async def main():
     print("🚀 Intelligent Search MCP Client v3.0")
     print("=" * 50)
     
-    # Test LLM client connection first
+    # Initialize MCP client
     try:
-        llm_client = get_llm_client()
-        if not llm_client.test_connection():
-            print("❌ Failed to connect to LLM. Check your API key and configuration.")
-            return
-        
-        print("✅ LLM connection successful!")
-        
-        # Create MCP client using centralized configuration
-        from configurations.config import config
-        llm_config = config.get_llm_config()
-        
-        if llm_config["client_type"] == "custom":
-            print(f"🔗 Using custom OpenAI endpoint: {llm_config['base_url']}")
-        else:
-            print("🔗 Using default OpenAI endpoint")
-        
         client = OpenAIMCPClient()
         
         # Test MCP server connection
