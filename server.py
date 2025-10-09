@@ -17,8 +17,10 @@ import logging
 import os
 import sys
 import asyncio
+import gc
 from datetime import datetime, timedelta
 from typing import Dict, Any, Tuple
+from collections import OrderedDict
 from dotenv import load_dotenv
 from fastmcp import FastMCP, Context
 
@@ -48,31 +50,68 @@ mcp = FastMCP("deepsearch-mcp")
 web_fetcher = WebFetcher()
 
 # ============================================================================
-# Simple Content Cache
+# Memory-Efficient Content Cache with Size Limits
 # ============================================================================
-class SimpleCache:
-    def __init__(self, ttl_minutes: int = 30):
-        self.cache: Dict[str, Tuple[str, datetime]] = {}
+class MemoryEfficientCache:
+    """
+    LRU cache with strict size limits to prevent memory bloat.
+    Max 10 items, 10 minutes TTL, auto-cleanup on access.
+    """
+    def __init__(self, max_items: int = 10, ttl_minutes: int = 10):
+        self.cache: OrderedDict[str, Tuple[str, datetime]] = OrderedDict()
+        self.max_items = max_items
         self.ttl = timedelta(minutes=ttl_minutes)
     
     def get(self, url: str) -> str | None:
+        # Clean expired entries on every access
+        self._cleanup_expired()
+        
         if url in self.cache:
             content, timestamp = self.cache[url]
             if datetime.now() - timestamp < self.ttl:
+                # Move to end (most recently used)
+                self.cache.move_to_end(url)
                 return content
+            else:
+                # Expired - remove it
+                del self.cache[url]
         return None
     
     def set(self, url: str, content: str):
+        # Remove if exists (will re-add at end)
+        if url in self.cache:
+            del self.cache[url]
+        
+        # Add to end
         self.cache[url] = (content, datetime.now())
+        
+        # Enforce max size - remove oldest
+        while len(self.cache) > self.max_items:
+            self.cache.popitem(last=False)
+    
+    def _cleanup_expired(self):
+        """Remove expired entries"""
+        now = datetime.now()
+        expired_keys = [
+            key for key, (_, timestamp) in self.cache.items()
+            if now - timestamp >= self.ttl
+        ]
+        for key in expired_keys:
+            del self.cache[key]
+    
+    def clear(self):
+        """Clear cache and force garbage collection"""
+        self.cache.clear()
+        gc.collect()
 
-content_cache = SimpleCache()
+content_cache = MemoryEfficientCache(max_items=10, ttl_minutes=10)
 
 # ============================================================================
-# Response Size Limits
+# Response Size Limits (Reduced for 2Gi memory limit)
 # ============================================================================
-MAX_CONTENT_PER_URL = 25000  # Max 25k chars per URL (≈6k tokens, matches web_fetcher)
-MAX_TOTAL_RESPONSE_SIZE = 800000  # Max 800k chars total (≈200k tokens, well under 1MB)
-TARGET_URLS_TO_FETCH = 5  # Try to fetch at least 5 URLs
+MAX_CONTENT_PER_URL = 20000  # Reduced from 25k → 20k chars (≈5k tokens)
+MAX_TOTAL_RESPONSE_SIZE = 600000  # Reduced from 800k → 600k chars (≈150k tokens)
+TARGET_URLS_TO_FETCH = 3  # Reduced from 5 → 3 URLs
 
 
 def truncate_content(content: str, max_chars: int, url: str) -> tuple[str, bool]:
@@ -376,6 +415,9 @@ async def web_search(query: str, num_results: int = 5, auto_fetch: bool = True, 
             else:
                 if ctx:
                     await ctx.warning(f"Only fetched {successful_scrapes} URLs (target: {TARGET_URLS_TO_FETCH})")
+            
+            # Force garbage collection after fetching to release memory
+            gc.collect()
         else:
             response['next_steps'] = "Call fetch_url() on relevant URLs to get full content"
         
@@ -465,6 +507,10 @@ async def fetch_url(url: str, ctx: Context = None) -> str:
             await ctx.info(f"Fetched {len(truncated_content):,} characters{truncate_info}")
         
         logger.info(f"Fetch completed: {len(truncated_content)} characters")
+        
+        # Force garbage collection after fetching
+        gc.collect()
+        
         return json.dumps(response, indent=2)
         
     except Exception as e:

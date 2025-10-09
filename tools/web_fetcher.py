@@ -11,6 +11,7 @@ import asyncio
 import aiohttp
 import time
 import json
+import gc
 from typing import List, Dict, Any, Tuple, Optional
 from dataclasses import dataclass
 from urllib.parse import urlparse
@@ -20,16 +21,16 @@ from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
 from crawl4ai.content_filter_strategy import PruningContentFilter
 from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
 
-# Maximum content length per URL (characters)
-MAX_CONTENT_LENGTH = 25000  # ~6k tokens, safe for JSON responses
+# Maximum content length per URL (characters) - REDUCED for memory management
+MAX_CONTENT_LENGTH = 20000  # Reduced from 25k → 20k (~5k tokens)
 
 class SimpleBrowserManager:
-    """Simple browser lifecycle management"""
+    """Simple browser lifecycle management with aggressive restart for memory"""
     def __init__(self):
         self.urls_processed = 0
         self.session_start = time.time()
-        self.max_urls = 50
-        self.max_time = 900
+        self.max_urls = 10  # CRITICAL: Reduced from 50 → 10 for memory management
+        self.max_time = 900  # 15 minutes max
         
     def should_restart(self):
         return (self.urls_processed >= self.max_urls or 
@@ -38,6 +39,8 @@ class SimpleBrowserManager:
     def reset(self):
         self.urls_processed = 0
         self.session_start = time.time()
+        # Force garbage collection on reset
+        gc.collect()
 
 @dataclass
 class ScrapResult:
@@ -160,11 +163,15 @@ class HybridScraper:
             import sys
             is_stdio_mode = len(sys.argv) > 1 and sys.argv[1] == "--stdio"
             if not is_stdio_mode:
-                print(f"Restarting browser after {self.browser_manager.urls_processed} URLs")
+                print(f"🔄 Restarting browser after {self.browser_manager.urls_processed} URLs")
             try:
                 await self.crawler.__aexit__(None, None, None)
             finally:
                 self.crawler = None  # Critical: clear reference
+            
+            # Force garbage collection after closing browser
+            gc.collect()
+            
             await asyncio.sleep(1)  # Give it a moment
         await self._init_crawler()
         self.browser_manager.reset()
@@ -385,6 +392,9 @@ class HybridScraper:
                 # Update browser manager counter
                 self.browser_manager.urls_processed += 1
                 
+                # Force garbage collection after each browser scrape
+                gc.collect()
+                
                 return ScrapResult(
                     url=url,
                     content=content,
@@ -499,6 +509,9 @@ class HybridScraper:
         for result in formatted_results:
             result['metadata'].update(batch_metadata)
         
+        # Force garbage collection after batch processing
+        gc.collect()
+        
         # Save to JSON file if specified
         if output_file:
             self._save_to_json(formatted_results, output_file, batch_metadata)
@@ -551,6 +564,8 @@ class WebFetcher:
         try:
             result = await self.scraper._scrape_single(url)
             if result.success:
+                # Force garbage collection after fetch
+                gc.collect()
                 return result.content
             else:
                 return f"Error fetching {url}: {result.error}"
