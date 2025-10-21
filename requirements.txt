@@ -5,8 +5,17 @@ fastmcp==2.12.1
 openai>=1.12.0
 
 # Web crawling and content extraction
-crawl4ai>=0.3.0
+aiohttp>=3.8.0
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
 requests>=2.31.0
+
+# Optional markdown converters (for better HTML-to-Markdown conversion)
+# markitdown>=0.0.1a4  # Uncomment for advanced markdown conversion
+# html-to-markdown>=0.1.0  # Uncomment for Rust-based conversion
+
+# Optional browser automation (only when needed for JS-heavy sites)
+# playwright>=1.40.0  # Uncomment for browser fallback
 
 # Environment and configuration
 python-dotenv>=1.0.0

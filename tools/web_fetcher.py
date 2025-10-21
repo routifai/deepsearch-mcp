@@ -1,123 +1,290 @@
 """
-CHANGES FROM ORIGINAL:
-1. Added MAX_CONTENT_LENGTH constant (25k chars - safe limit)
-2. Added _truncate_content() method for post-filter truncation
-3. Apply truncation in _browser_scrape() after getting filtered markdown
-4. This ensures even filtered content stays within reasonable limits
-5. Removed excessive comments, kept it clean
+TRUE LIGHTWEIGHT HYBRID SCRAPER
+================================
+The smart approach:
+1. Try HTTP + BeautifulSoup first (FAST - ~50ms)
+2. Convert to Markdown with markitdown or html-to-markdown (FAST)
+3. Only spin up browser if page needs JS (SLOW - ~2s)
+
+NO Crawl4AI for simple pages!
+Only use browser when absolutely necessary.
 """
 
 import asyncio
 import aiohttp
 import time
-import json
-import gc
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any, Optional, Set
 from dataclasses import dataclass
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin, urldefrag
+from bs4 import BeautifulSoup
 import re
 from datetime import datetime
-from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
-from crawl4ai.content_filter_strategy import PruningContentFilter
-from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
+from collections import defaultdict
+import hashlib
 
-# Maximum content length per URL (characters) - REDUCED for memory management
-MAX_CONTENT_LENGTH = 20000  # Reduced from 25k → 20k (~5k tokens)
+# Try to import markdown converters
+try:
+    from markitdown import MarkItDown
+    MARKITDOWN_AVAILABLE = True
+except ImportError:
+    MARKITDOWN_AVAILABLE = False
 
-class SimpleBrowserManager:
-    """Simple browser lifecycle management with aggressive restart for memory"""
-    def __init__(self):
-        self.urls_processed = 0
-        self.session_start = time.time()
-        self.max_urls = 10  # CRITICAL: Reduced from 50 → 10 for memory management
-        self.max_time = 900  # 15 minutes max
-        
-    def should_restart(self):
-        return (self.urls_processed >= self.max_urls or 
-                time.time() - self.session_start > self.max_time)
-    
-    def reset(self):
-        self.urls_processed = 0
-        self.session_start = time.time()
-        # Force garbage collection on reset
-        gc.collect()
+try:
+    from html_to_markdown import convert as html2md
+    HTML2MD_AVAILABLE = True
+except ImportError:
+    HTML2MD_AVAILABLE = False
+
+# Browser fallback (only when needed)
+try:
+    from playwright.async_api import async_playwright
+    PLAYWRIGHT_AVAILABLE = True
+except ImportError:
+    PLAYWRIGHT_AVAILABLE = False
+
 
 @dataclass
 class ScrapResult:
     url: str
-    content: str
+    content: str  # Clean markdown content
+    raw_html: Optional[str]  # Optional raw HTML
     metadata: Dict[str, Any]
-    method: str
+    method: str  # 'http' or 'browser'
     success: bool
     error: Optional[str] = None
     response_time: float = 0.0
 
-class HybridScraper:
+
+class MarkdownConverter:
+    """Convert HTML to Markdown using best available library"""
+    
     def __init__(self):
-        self.session = None
-        self.crawler = None
-        self.browser_manager = SimpleBrowserManager()
+        if MARKITDOWN_AVAILABLE:
+            self.markitdown = MarkItDown()
+            self.method = "markitdown"
+        elif HTML2MD_AVAILABLE:
+            self.method = "html2markdown"
+        else:
+            self.method = "fallback"
+    
+    def convert(self, html: str, url: str = "") -> str:
+        """Convert HTML to clean Markdown"""
+        try:
+            if self.method == "markitdown":
+                # MarkItDown expects a file, so we need to use BeautifulSoup
+                # to clean and then convert
+                soup = BeautifulSoup(html, 'lxml')
+                # Remove script, style, nav, footer
+                for tag in soup(['script', 'style', 'nav', 'footer', 'header', 'aside']):
+                    tag.decompose()
+                
+                # Get text with some structure preserved
+                clean_html = str(soup)
+                
+                # Simple HTML to Markdown conversion
+                # (MarkItDown is mainly for files, so we'll do basic conversion)
+                return self._basic_html_to_markdown(soup)
+            
+            elif self.method == "html2markdown":
+                # Fast Rust-based converter
+                return html2md(html)
+            
+            else:
+                # Fallback: Use BeautifulSoup to extract text
+                soup = BeautifulSoup(html, 'lxml')
+                for tag in soup(['script', 'style', 'nav', 'footer', 'header', 'aside']):
+                    tag.decompose()
+                return self._basic_html_to_markdown(soup)
         
-        # More aggressive content filtering
-        self.content_filter = PruningContentFilter(
-            threshold=0.55,  # Increased from 0.48 - more aggressive
-            threshold_type="fixed",
-            min_word_threshold=15,  # Increased from 10
-        )
+        except Exception as e:
+            # Fallback to simple text extraction
+            soup = BeautifulSoup(html, 'lxml')
+            return soup.get_text(separator='\n', strip=True)
+    
+    def _basic_html_to_markdown(self, soup: BeautifulSoup) -> str:
+        """Basic HTML to Markdown conversion"""
+        markdown_parts = []
         
-        self.markdown_generator = DefaultMarkdownGenerator(
-            content_filter=self.content_filter,
-            options={
-                "ignore_links": False,
-                "body_width": 0,
-                "include_code": True,
-                "include_tables": True,
-                "citations": True,
-            }
-        )
+        # Process headings
+        for i in range(1, 7):
+            for heading in soup.find_all(f'h{i}'):
+                text = heading.get_text(strip=True)
+                markdown_parts.append(f"{'#' * i} {text}\n")
+                heading.decompose()
         
-        self.dynamic_indicators = [
+        # Process lists
+        for ul in soup.find_all('ul'):
+            for li in ul.find_all('li'):
+                text = li.get_text(strip=True)
+                markdown_parts.append(f"- {text}\n")
+            ul.decompose()
+        
+        for ol in soup.find_all('ol'):
+            for idx, li in enumerate(ol.find_all('li'), 1):
+                text = li.get_text(strip=True)
+                markdown_parts.append(f"{idx}. {text}\n")
+            ol.decompose()
+        
+        # Process links
+        for a in soup.find_all('a', href=True):
+            text = a.get_text(strip=True)
+            href = a['href']
+            if text:
+                markdown_parts.append(f"[{text}]({href})")
+            a.decompose()
+        
+        # Process bold/strong
+        for tag in soup.find_all(['b', 'strong']):
+            text = tag.get_text(strip=True)
+            markdown_parts.append(f"**{text}**")
+            tag.decompose()
+        
+        # Process italic/em
+        for tag in soup.find_all(['i', 'em']):
+            text = tag.get_text(strip=True)
+            markdown_parts.append(f"*{text}*")
+            tag.decompose()
+        
+        # Get remaining text
+        remaining_text = soup.get_text(separator='\n', strip=True)
+        
+        # Combine everything
+        markdown = '\n'.join(markdown_parts) + '\n\n' + remaining_text
+        
+        # Clean up multiple newlines
+        markdown = re.sub(r'\n{3,}', '\n\n', markdown)
+        
+        return markdown.strip()
+
+
+class DynamicContentDetector:
+    """Detect if a page needs browser rendering"""
+    
+    def __init__(self):
+        # Patterns that indicate dynamic content
+        self.js_framework_patterns = [
             r'<script[^>]*>((?!<\/script>).)*react',
             r'<script[^>]*>((?!<\/script>).)*vue',
             r'<script[^>]*>((?!<\/script>).)*angular',
             r'<script[^>]*>((?!<\/script>).)*next\.js',
-            r'document\.addEventListener\(["\']DOMContentLoaded',
-            r'window\.onload',
-            r'<div[^>]*id=["\']root["\']',
-            r'<div[^>]*id=["\']app["\']',
-            r'loading["\s]*[=:]["\s]*true',
-            r'spa-|single.page',
+            r'window\.React',
+            r'window\.Vue',
+            r'ng-app',
+            r'data-react',
+            r'data-vue',
         ]
         
-        self.dynamic_pattern = re.compile('|'.join(self.dynamic_indicators), re.IGNORECASE)
+        self.dynamic_indicators = [
+            r'<div[^>]*id=["\']root["\']',
+            r'<div[^>]*id=["\']app["\']',
+            r'<div[^>]*id=["\']__next["\']',
+            r'document\.addEventListener\(["\']DOMContentLoaded',
+            r'window\.onload',
+            r'loading["\s]*[=:]["\s]*true',
+            r'<noscript>',
+        ]
         
+        self.pattern = re.compile(
+            '|'.join(self.js_framework_patterns + self.dynamic_indicators),
+            re.IGNORECASE
+        )
+    
+    def needs_browser(self, html: str, url: str) -> tuple[bool, str]:
+        """
+        Check if page needs browser rendering
+        Returns: (needs_browser: bool, reason: str)
+        """
+        # Check 1: Very little content
+        text_only = re.sub(r'<[^>]+>', '', html)
+        if len(text_only.strip()) < 200:
+            return True, "minimal_content"
+        
+        # Check 2: JS framework detected
+        if self.pattern.search(html[:10000]):  # Check first 10KB
+            return True, "js_framework"
+        
+        # Check 3: High script-to-content ratio
+        script_content = len(re.findall(r'<script[^>]*>.*?</script>', html, re.DOTALL))
+        total_length = len(html)
+        if total_length > 0 and (script_content / total_length) > 0.3:
+            return True, "high_js_ratio"
+        
+        # Check 4: Known SPA patterns
+        if 'spa-' in html.lower() or 'single-page' in html.lower():
+            return True, "spa_pattern"
+        
+        return False, "static_content"
+
+
+class RateLimiter:
+    """Simple rate limiter per domain"""
+    
+    def __init__(self, requests_per_second: float = 2.0):
+        self.min_interval = 1.0 / requests_per_second
+        self.last_request: Dict[str, float] = defaultdict(float)
+        self.lock = asyncio.Lock()
+    
+    async def wait(self, domain: str):
+        async with self.lock:
+            elapsed = time.time() - self.last_request[domain]
+            if elapsed < self.min_interval:
+                await asyncio.sleep(self.min_interval - elapsed)
+            self.last_request[domain] = time.time()
+
+
+class TrueLightweightHybridScraper:
+    """
+    TRUE Hybrid: Fast HTTP + Markdown conversion, browser only when needed
+    """
+    
+    def __init__(
+        self,
+        rate_limit: float = 2.0,
+        max_concurrent: int = 20,
+        timeout: int = 10,
+        user_agent: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    ):
+        self.rate_limiter = RateLimiter(rate_limit)
+        self.semaphore = asyncio.Semaphore(max_concurrent)
+        self.timeout = timeout
+        self.user_agent = user_agent
+        
+        self.session: Optional[aiohttp.ClientSession] = None
+        self.browser = None
+        self.browser_context = None
+        
+        self.markdown_converter = MarkdownConverter()
+        self.detector = DynamicContentDetector()
+        
+        # Stats
+        self.stats = {
+            'http_scrapes': 0,
+            'browser_scrapes': 0,
+            'failed_scrapes': 0,
+            'total_time': 0.0
+        }
+    
     async def __aenter__(self):
         await self._init_session()
         return self
-        
+    
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        if self.session:
-            await self.session.close()
-        if self.crawler:
-            await self.crawler.__aexit__(exc_type, exc_val, exc_tb)
+        await self.cleanup()
     
     async def _init_session(self):
-        """Initialize aiohttp session for fast HTTP requests"""
-        timeout = aiohttp.ClientTimeout(total=10, connect=5)
+        """Initialize HTTP session"""
+        timeout = aiohttp.ClientTimeout(total=self.timeout)
         connector = aiohttp.TCPConnector(
-            limit=50,
-            limit_per_host=10,
-            keepalive_timeout=30,
-            enable_cleanup_closed=True
+            limit=100,
+            limit_per_host=20,
+            ttl_dns_cache=300,
         )
         
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'User-Agent': self.user_agent,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.5',
             'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
         }
         
         self.session = aiohttp.ClientSession(
@@ -126,179 +293,147 @@ class HybridScraper:
             headers=headers
         )
     
-    async def _init_crawler(self):
-        """Initialize Crawl4AI with performance optimizations"""
-        browser_config = BrowserConfig(
-            headless=True,
-            browser_type="chromium",
-            text_mode=True,
-            light_mode=True,
-            viewport_width=1280,
-            viewport_height=800,
-            extra_args=[
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--disable-extensions",
-                "--disable-plugins",
-                "--disable-images",
-                "--disable-background-timer-throttling",
-                "--disable-renderer-backgrounding",
-                "--disable-backgrounding-occluded-windows",
-            ]
-        )
+    async def _init_browser(self):
+        """Initialize browser ONLY when needed"""
+        if not PLAYWRIGHT_AVAILABLE:
+            raise RuntimeError(
+                "Playwright not installed. Run: pip install playwright && playwright install chromium"
+            )
         
-        self.crawler = AsyncWebCrawler(config=browser_config)
-        await self.crawler.__aenter__()
-        # Only log in HTTP mode to avoid MCP JSON parsing errors
-        import sys
-        is_stdio_mode = len(sys.argv) > 1 and sys.argv[1] == "--stdio"
-        if not is_stdio_mode:
-            print(f"Browser initialized (URLs processed: {self.browser_manager.urls_processed})")
+        if self.browser is None:
+            playwright = await async_playwright().start()
+            self.browser = await playwright.chromium.launch(
+                headless=True,
+                args=['--no-sandbox', '--disable-dev-shm-usage']
+            )
+            self.browser_context = await self.browser.new_context(
+                user_agent=self.user_agent
+            )
     
-    async def _restart_browser(self):
-        """Restart browser when needed"""
-        if self.crawler:
-            # Only log in HTTP mode to avoid MCP JSON parsing errors
-            import sys
-            is_stdio_mode = len(sys.argv) > 1 and sys.argv[1] == "--stdio"
-            if not is_stdio_mode:
-                print(f"🔄 Restarting browser after {self.browser_manager.urls_processed} URLs")
-            try:
-                await self.crawler.__aexit__(None, None, None)
-            finally:
-                self.crawler = None  # Critical: clear reference
-            
-            # Force garbage collection after closing browser
-            gc.collect()
-            
-            await asyncio.sleep(1)  # Give it a moment
-        await self._init_crawler()
-        self.browser_manager.reset()
+    async def cleanup(self):
+        """Cleanup resources"""
+        if self.session:
+            await self.session.close()
+        if self.browser_context:
+            await self.browser_context.close()
+        if self.browser:
+            await self.browser.close()
     
-    def _truncate_content(self, content: str, max_length: int = MAX_CONTENT_LENGTH) -> Tuple[str, bool]:
-        """
-        Truncate content to max_length with smart truncation.
-        Returns (truncated_content, was_truncated)
-        """
-        if len(content) <= max_length:
-            return content, False
-        
-        # Smart truncation: try to end at paragraph or sentence
-        truncated = content[:max_length]
-        
-        # Try to find last paragraph break (double newline)
-        last_para = truncated.rfind('\n\n')
-        if last_para > max_length * 0.75:  # At least 75% of content
-            truncated = truncated[:last_para]
-        else:
-            # Try to find last sentence
-            last_period = truncated.rfind('. ')
-            if last_period > max_length * 0.75:
-                truncated = truncated[:last_period + 1]
-        
-        truncated += "\n\n[Content truncated for size - this is a filtered excerpt]"
-        return truncated, True
-    
-    def _extract_metadata(self, content: str, url: str) -> Dict[str, Any]:
-        """Extract basic metadata from HTML content"""
+    def _extract_metadata(self, soup: BeautifulSoup, url: str) -> Dict[str, Any]:
+        """Extract metadata from parsed HTML"""
         metadata = {
             'url': url,
-            'content_length': len(content),
-            'has_forms': '<form' in content.lower(),
-            'has_scripts': '<script' in content.lower(),
             'domain': urlparse(url).netloc,
             'scraped_at': datetime.now().isoformat()
         }
         
-        # Extract title
-        title_match = re.search(r'<title[^>]*>(.*?)</title>', content, re.IGNORECASE | re.DOTALL)
-        if title_match:
-            metadata['title'] = title_match.group(1).strip()[:200]
+        # Title
+        if title := soup.find('title'):
+            metadata['title'] = title.get_text(strip=True)
         
-        # Extract meta description
-        desc_match = re.search(r'<meta[^>]*name=["\']description["\'][^>]*content=["\']([^"\']*)["\']', content, re.IGNORECASE)
-        if desc_match:
-            metadata['description'] = desc_match.group(1).strip()[:300]
+        # Meta description
+        if desc := soup.find('meta', {'name': 'description'}):
+            metadata['description'] = desc.get('content', '')[:300]
         
-        # Count links and images
-        metadata['link_count'] = len(re.findall(r'<a[^>]*href=', content, re.IGNORECASE))
-        metadata['image_count'] = len(re.findall(r'<img[^>]*src=', content, re.IGNORECASE))
+        # Open Graph
+        if og_title := soup.find('meta', {'property': 'og:title'}):
+            metadata['og_title'] = og_title.get('content', '')
+        
+        if og_desc := soup.find('meta', {'property': 'og:description'}):
+            metadata['og_description'] = og_desc.get('content', '')
+        
+        # Counts
+        metadata['link_count'] = len(soup.find_all('a', href=True))
+        metadata['image_count'] = len(soup.find_all('img'))
         
         return metadata
     
-    def _needs_browser(self, content: str, url: str) -> bool:
-        """Determine if content needs browser rendering"""
-        if len(content) < 1000:
-            return True
-            
-        if self.dynamic_pattern.search(content):
-            return True
-            
-        text_content = re.sub(r'<[^>]+>', '', content)
-        if len(text_content.strip()) < 100:
-            return True
-            
-        if any(pattern in content.lower() for pattern in [
-            'id="root"', 'id="app"', 'class="app"',
-            'loading...', 'please enable javascript'
-        ]):
-            return True
-            
-        return False
-    
-    async def _http_scrape(self, url: str) -> ScrapResult:
-        """Fast HTTP-based scraping"""
+    async def _scrape_http(self, url: str) -> ScrapResult:
+        """
+        Fast HTTP scraping with BeautifulSoup + Markdown conversion
+        NO BROWSER - Pure Python
+        """
         start_time = time.time()
+        domain = urlparse(url).netloc
         
         try:
-            async with self.session.get(url, allow_redirects=True) as response:
-                if response.status == 200:
-                    content = await response.text()
-                    response_time = time.time() - start_time
-                    
-                    if self._needs_browser(content, url):
-                        return ScrapResult(
-                            url=url,
-                            content="",
-                            metadata={},
-                            method="http_failed",
-                            success=False,
-                            error="Requires browser rendering",
-                            response_time=response_time
-                        )
-                    
-                    # Apply truncation to HTTP content too
-                    content, was_truncated = self._truncate_content(content)
-                    
-                    metadata = self._extract_metadata(content, url)
-                    metadata['status_code'] = response.status
-                    metadata['response_time'] = response_time
-                    metadata['was_truncated'] = was_truncated
-                    
-                    return ScrapResult(
-                        url=url,
-                        content=content,
-                        metadata=metadata,
-                        method="http",
-                        success=True,
-                        response_time=response_time
-                    )
-                else:
+            # Rate limit
+            await self.rate_limiter.wait(domain)
+            
+            # Fetch HTML
+            async with self.session.get(url) as response:
+                if response.status >= 400:
                     return ScrapResult(
                         url=url,
                         content="",
+                        raw_html=None,
                         metadata={'status_code': response.status},
                         method="http",
                         success=False,
                         error=f"HTTP {response.status}",
                         response_time=time.time() - start_time
                     )
-                    
+                
+                html = await response.text()
+            
+            # Parse with BeautifulSoup
+            soup = BeautifulSoup(html, 'lxml')
+            
+            # Check if browser needed
+            needs_browser, reason = self.detector.needs_browser(html, url)
+            
+            if needs_browser:
+                return ScrapResult(
+                    url=url,
+                    content="",
+                    raw_html=html,
+                    metadata={'needs_browser_reason': reason},
+                    method="http",
+                    success=False,
+                    error=f"Needs browser: {reason}",
+                    response_time=time.time() - start_time
+                )
+            
+            # Convert to Markdown (FAST!)
+            markdown = self.markdown_converter.convert(html, url)
+            
+            # Extract metadata
+            metadata = self._extract_metadata(soup, url)
+            metadata.update({
+                'status_code': response.status,
+                'content_length': len(markdown),
+                'conversion_method': self.markdown_converter.method,
+                'response_time': time.time() - start_time
+            })
+            
+            self.stats['http_scrapes'] += 1
+            
+            return ScrapResult(
+                url=url,
+                content=markdown,
+                raw_html=html if len(html) < 50000 else None,  # Don't store huge HTML
+                metadata=metadata,
+                method="http",
+                success=True,
+                response_time=time.time() - start_time
+            )
+        
+        except asyncio.TimeoutError:
+            return ScrapResult(
+                url=url,
+                content="",
+                raw_html=None,
+                metadata={},
+                method="http",
+                success=False,
+                error="Timeout",
+                response_time=time.time() - start_time
+            )
         except Exception as e:
             return ScrapResult(
                 url=url,
                 content="",
+                raw_html=None,
                 metadata={},
                 method="http",
                 success=False,
@@ -306,182 +441,138 @@ class HybridScraper:
                 response_time=time.time() - start_time
             )
     
-    async def _browser_scrape(self, url: str) -> ScrapResult:
-        """Browser-based scraping with Crawl4AI using content filters"""
+    async def _scrape_browser(self, url: str) -> ScrapResult:
+        """
+        Browser fallback for JavaScript-heavy sites
+        ONLY CALLED WHEN HTTP FAILS
+        """
         start_time = time.time()
         
-        # Initialize browser if needed
-        if self.crawler is None:
-            await self._init_crawler()
-        
-        # Check if we should restart browser
-        if self.browser_manager.should_restart():
-            await self._restart_browser()
-        
         try:
-            # NOW PROPERLY USING the content filter and markdown generator!
-            run_config = CrawlerRunConfig(
-                cache_mode=CacheMode.BYPASS,
-                word_count_threshold=10,
-                page_timeout=15000,
-                excluded_tags=["script", "style"],
-                exclude_external_images=True,
-                remove_overlay_elements=True,
-                delay_before_return_html=1.0,
-                verbose=False,
-                
-                # ✅ USING THE IMPORTED MODULES HERE:
-                markdown_generator=self.markdown_generator,  # Uses PruningContentFilter internally
-            )
+            # Initialize browser if needed
+            if self.browser is None:
+                await self._init_browser()
             
-            result = await self.crawler.arun(url, config=run_config)
-            response_time = time.time() - start_time
+            # Create new page
+            page = await self.browser_context.new_page()
             
-            if result.success:
-                # Extract the filtered content
-                content = ""
-                content_type = "unknown"
+            try:
+                # Navigate and wait for content
+                await page.goto(url, wait_until='networkidle', timeout=30000)
                 
-                if hasattr(result.markdown, 'fit_markdown') and result.markdown.fit_markdown:
-                    content = result.markdown.fit_markdown
-                    content_type = "filtered_markdown"
-                elif hasattr(result.markdown, 'raw_markdown') and result.markdown.raw_markdown:
-                    content = result.markdown.raw_markdown  
-                    content_type = "raw_markdown"
-                elif isinstance(result.markdown, str):
-                    content = result.markdown
-                    content_type = "string_markdown"
-                else:
-                    content = result.cleaned_html or result.html
-                    content_type = "html_fallback"
+                # Wait a bit for JS to execute
+                await page.wait_for_timeout(2000)
                 
-                # ✅ CRITICAL: Apply post-filter truncation
-                # Even filtered markdown can be too large for JSON responses
-                original_length = len(content)
-                content, was_truncated = self._truncate_content(content, MAX_CONTENT_LENGTH)
+                # Get rendered HTML
+                html = await page.content()
                 
-                metadata = {
-                    'url': result.url or url,
-                    'final_url': result.url,
-                    'status_code': result.status_code,
-                    'content_length': len(content),
-                    'original_length': original_length,
-                    'was_truncated': was_truncated,
-                    'response_time': response_time,
-                    'method': 'browser',
-                    'content_type': content_type,
-                    'scraped_at': datetime.now().isoformat(),
-                    'has_js': bool(result.js_execution_result),
-                    'content_filtered': content_type == "filtered_markdown",
-                }
+                # Parse
+                soup = BeautifulSoup(html, 'lxml')
                 
-                # Extract links and media info
-                if result.links:
-                    metadata['links_found'] = len(result.links.get('internal', [])) + len(result.links.get('external', []))
-                if result.media:
-                    metadata['images_found'] = len(result.media.get('images', []))
+                # Convert to markdown
+                markdown = self.markdown_converter.convert(html, url)
                 
-                # Extract title
-                if result.metadata and hasattr(result.metadata, 'title'):
-                    metadata['title'] = result.metadata.title
-                else:
-                    title_match = re.search(r'<title[^>]*>(.*?)</title>', result.html or '', re.IGNORECASE | re.DOTALL)
-                    if title_match:
-                        metadata['title'] = title_match.group(1).strip()[:200]
+                # Extract metadata
+                metadata = self._extract_metadata(soup, url)
+                metadata.update({
+                    'content_length': len(markdown),
+                    'browser_rendered': True,
+                    'response_time': time.time() - start_time
+                })
                 
-                # Update browser manager counter
-                self.browser_manager.urls_processed += 1
-                
-                # Force garbage collection after each browser scrape
-                gc.collect()
+                self.stats['browser_scrapes'] += 1
                 
                 return ScrapResult(
                     url=url,
-                    content=content,
+                    content=markdown,
+                    raw_html=None,  # Don't store browser HTML (too large)
                     metadata=metadata,
                     method="browser",
                     success=True,
-                    response_time=response_time
+                    response_time=time.time() - start_time
                 )
-            else:
-                return ScrapResult(
-                    url=url,
-                    content="",
-                    metadata={
-                        'error': result.error_message,
-                        'status_code': result.status_code,
-                        'scraped_at': datetime.now().isoformat()
-                    },
-                    method="browser",
-                    success=False,
-                    error=result.error_message,
-                    response_time=response_time
-                )
-                
+            
+            finally:
+                await page.close()
+        
         except Exception as e:
+            self.stats['failed_scrapes'] += 1
             return ScrapResult(
                 url=url,
                 content="",
-                metadata={'scraped_at': datetime.now().isoformat()},
+                raw_html=None,
+                metadata={},
                 method="browser",
                 success=False,
                 error=str(e),
                 response_time=time.time() - start_time
             )
     
-    async def _scrape_single(self, url: str) -> ScrapResult:
-        """Scrape a single URL with hybrid approach"""
-        # First attempt: Fast HTTP
-        http_result = await self._http_scrape(url)
-        
-        # If HTTP worked, return it
-        if http_result.success:
-            return http_result
-        
-        # If HTTP failed or content needs browser, use Crawl4AI with content filtering
-        return await self._browser_scrape(url)
-    
-    async def scrape_urls(self, urls: List[str], output_file: str = None) -> List[Dict[str, Any]]:
+    async def scrape_single(self, url: str) -> ScrapResult:
         """
-        Scrape multiple URLs with hybrid approach and content filtering
+        Scrape single URL with hybrid approach:
+        1. Try HTTP + Markdown (FAST)
+        2. If needs browser → Use browser (SLOW)
+        """
+        # Try HTTP first
+        result = await self._scrape_http(url)
+        
+        if result.success:
+            return result
+        
+        # Check if it needs browser
+        if "Needs browser" in (result.error or ""):
+            # Fallback to browser
+            return await self._scrape_browser(url)
+        
+        # Other error - return failed result
+        self.stats['failed_scrapes'] += 1
+        return result
+    
+    async def scrape_urls(
+        self,
+        urls: List[str],
+        show_progress: bool = True
+    ) -> List[Dict[str, Any]]:
+        """
+        Scrape multiple URLs with hybrid approach
         """
         if not urls:
             return []
         
-        start_time = time.time()
-        print(f"Starting scrape of {len(urls)} URLs with content filtering and truncation...")
+        batch_start = time.time()
         
-        tasks = [self._scrape_single(url) for url in urls]
+        if show_progress:
+            print(f"🚀 Scraping {len(urls)} URLs with TRUE hybrid approach...")
+            print(f"   Strategy: HTTP first → Browser only if needed")
+            print(f"   Markdown converter: {self.markdown_converter.method}")
+        
+        # Scrape all URLs with semaphore control
+        async def scrape_with_semaphore(url: str):
+            async with self.semaphore:
+                return await self.scrape_single(url)
+        
+        tasks = [scrape_with_semaphore(url) for url in urls]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
+        # Format results
         formatted_results = []
-        successful_scrapes = 0
-        filtered_content_count = 0
-        truncated_count = 0
-        
         for i, result in enumerate(results):
             if isinstance(result, Exception):
                 formatted_results.append({
                     'url': urls[i],
                     'content': '',
                     'metadata': {
-                        'error': str(result),
                         'success': False,
-                        'method': 'error',
-                        'scraped_at': datetime.now().isoformat()
+                        'error': str(result),
+                        'method': 'error'
                     }
                 })
             else:
-                if result.success:
-                    successful_scrapes += 1
-                    if result.metadata.get('content_filtered'):
-                        filtered_content_count += 1
-                    if result.metadata.get('was_truncated'):
-                        truncated_count += 1
-                    
                 formatted_results.append({
                     'url': result.url,
                     'content': result.content,
+                    'raw_html': result.raw_html,
                     'metadata': {
                         **result.metadata,
                         'success': result.success,
@@ -491,53 +582,105 @@ class HybridScraper:
                     }
                 })
         
-        total_time = time.time() - start_time
+        batch_time = time.time() - batch_start
         
-        batch_metadata = {
-            'total_batch_time': total_time,
-            'urls_per_second': len(urls) / total_time if total_time > 0 else 0,
-            'total_urls': len(urls),
-            'successful_scrapes': successful_scrapes,
-            'failed_scrapes': len(urls) - successful_scrapes,
-            'content_filtered_count': filtered_content_count,
-            'content_truncated_count': truncated_count,
-            'average_response_time': total_time / len(urls),
-            'timestamp': datetime.now().isoformat(),
-            'max_content_length': MAX_CONTENT_LENGTH,
-        }
-        
-        for result in formatted_results:
-            result['metadata'].update(batch_metadata)
-        
-        # Force garbage collection after batch processing
-        gc.collect()
-        
-        # Save to JSON file if specified
-        if output_file:
-            self._save_to_json(formatted_results, output_file, batch_metadata)
+        # Print stats
+        if show_progress:
+            success_count = sum(1 for r in formatted_results if r['metadata']['success'])
+            http_count = self.stats['http_scrapes']
+            browser_count = self.stats['browser_scrapes']
+            failed_count = self.stats['failed_scrapes']
+            
+            print(f"\n✅ Completed in {batch_time:.2f}s ({len(urls)/batch_time:.2f} URLs/sec)")
+            print(f"   Success: {success_count}/{len(urls)}")
+            print(f"   HTTP (fast): {http_count} | Browser (slow): {browser_count}")
+            print(f"   Failed: {failed_count}")
+            
+            if http_count + browser_count > 0:
+                http_percent = (http_count / (http_count + browser_count)) * 100
+                print(f"   📊 {http_percent:.1f}% used fast HTTP path!")
         
         return formatted_results
     
-    def _save_to_json(self, results: List[Dict], filename: str, batch_metadata: Dict):
-        """Save results to JSON file with proper formatting"""
-        output_data = {
-            'batch_metadata': batch_metadata,
-            'results': results
-        }
+    async def extract_with_selectors(
+        self,
+        url: str,
+        selectors: Dict[str, str]
+    ) -> Dict[str, Any]:
+        """
+        Extract specific data using CSS selectors
+        Always uses HTTP (fast), even for dynamic sites we can try first
+        """
+        start_time = time.time()
         
         try:
-            with open(filename, 'w', encoding='utf-8') as f:
-                json.dump(output_data, f, indent=2, ensure_ascii=False)
-            # Only log in HTTP mode to avoid MCP JSON parsing errors
-            import sys
-            is_stdio_mode = len(sys.argv) > 1 and sys.argv[1] == "--stdio"
-            if not is_stdio_mode:
-                print(f"Results saved to {filename}")
+            async with self.session.get(url) as response:
+                html = await response.text()
+            
+            soup = BeautifulSoup(html, 'lxml')
+            
+            extracted = {}
+            for name, selector in selectors.items():
+                elements = soup.select(selector)
+                if len(elements) == 1:
+                    elem = elements[0]
+                    extracted[name] = {
+                        'text': elem.get_text(strip=True),
+                        'html': str(elem),
+                        'attrs': dict(elem.attrs) if hasattr(elem, 'attrs') else {}
+                    }
+                elif len(elements) > 1:
+                    extracted[name] = [
+                        {
+                            'text': elem.get_text(strip=True),
+                            'attrs': dict(elem.attrs) if hasattr(elem, 'attrs') else {}
+                        }
+                        for elem in elements
+                    ]
+                else:
+                    extracted[name] = None
+            
+            return {
+                'success': True,
+                'url': url,
+                'data': extracted,
+                'response_time': time.time() - start_time
+            }
+        
         except Exception as e:
-            import sys
-            is_stdio_mode = len(sys.argv) > 1 and sys.argv[1] == "--stdio"
-            if not is_stdio_mode:
-                print(f"Error saving to JSON: {e}")
+            return {
+                'success': False,
+                'url': url,
+                'error': str(e),
+                'response_time': time.time() - start_time
+            }
+
+
+# Convenience function
+async def scrape_urls_fast(
+    urls: List[str],
+    rate_limit: float = 2.0,
+    max_concurrent: int = 20,
+    timeout: int = 10
+) -> List[Dict[str, Any]]:
+    """
+    Quick scraping with TRUE hybrid approach
+    
+    Args:
+        urls: URLs to scrape
+        rate_limit: Requests per second per domain
+        max_concurrent: Max parallel requests
+        timeout: Request timeout in seconds
+    
+    Returns:
+        List of results with clean markdown content
+    """
+    async with TrueLightweightHybridScraper(
+        rate_limit=rate_limit,
+        max_concurrent=max_concurrent,
+        timeout=timeout
+    ) as scraper:
+        return await scraper.scrape_urls(urls)
 
 
 class WebFetcher:
@@ -558,14 +701,12 @@ class WebFetcher:
             Extracted and truncated content from the URL
         """
         if not self.scraper:
-            self.scraper = HybridScraper()
+            self.scraper = TrueLightweightHybridScraper()
             await self.scraper.__aenter__()
         
         try:
-            result = await self.scraper._scrape_single(url)
+            result = await self.scraper.scrape_single(url)
             if result.success:
-                # Force garbage collection after fetch
-                gc.collect()
                 return result.content
             else:
                 return f"Error fetching {url}: {result.error}"
@@ -574,7 +715,7 @@ class WebFetcher:
     
     async def __aenter__(self):
         if not self.scraper:
-            self.scraper = HybridScraper()
+            self.scraper = TrueLightweightHybridScraper()
             await self.scraper.__aenter__()
         return self
     
@@ -582,6 +723,8 @@ class WebFetcher:
         if self.scraper:
             await self.scraper.__aexit__(exc_type, exc_val, exc_tb)
 
+
+# Legacy function for backward compatibility
 async def scrap_urls(urls: List[str], output_file: str = None) -> List[Dict[str, Any]]:
     """
     High-performance URL scraper with intelligent content filtering and truncation
@@ -593,27 +736,51 @@ async def scrap_urls(urls: List[str], output_file: str = None) -> List[Dict[str,
     Returns:
         List of dictionaries with filtered, truncated, high-quality content
     """
-    async with HybridScraper() as scraper:
-        return await scraper.scrape_urls(urls, output_file)
+    async with TrueLightweightHybridScraper() as scraper:
+        return await scraper.scrape_urls(urls)
 
 
+# Example usage
 async def main():
-    """Example usage"""
+    """Test the TRUE hybrid scraper"""
+    
+    print("=" * 70)
+    print("TRUE LIGHTWEIGHT HYBRID SCRAPER")
+    print("=" * 70)
+    print("\n📋 Strategy:")
+    print("   1. HTTP + BeautifulSoup + Markdown (FAST ~50ms)")
+    print("   2. Browser only if JS detected (SLOW ~2s)")
+    print()
+    
     test_urls = [
-        "https://example.com",
-        "https://news.ycombinator.com",
+        "https://example.com",              # Static - will use HTTP
+        "https://news.ycombinator.com",     # Static - will use HTTP
+        "https://python.org",                # Static - will use HTTP
+        "https://react.dev",                 # Dynamic - will need browser
     ]
     
-    print(f"Scraping {len(test_urls)} URLs...")
-    results = await scrap_urls(test_urls)
+    results = await scrape_urls_fast(
+        urls=test_urls,
+        rate_limit=2.0,
+        max_concurrent=5
+    )
     
+    print("\n📝 Results:\n")
     for result in results:
-        metadata = result['metadata']
-        print(f"\nURL: {result['url']}")
-        print(f"   Success: {metadata['success']}")
-        print(f"   Content: {len(result['content']):,} chars")
-        if metadata.get('was_truncated'):
-            print(f"   Truncated from {metadata.get('original_length', 0):,} chars")
+        meta = result['metadata']
+        print(f"{'='*70}")
+        print(f"URL: {result['url']}")
+        print(f"Success: {meta['success']}")
+        print(f"Method: {meta.get('method', 'unknown')}")
+        print(f"Time: {meta.get('response_time', 0):.2f}s")
+        
+        if meta['success']:
+            content_preview = result['content'][:200].replace('\n', ' ')
+            print(f"Content: {content_preview}...")
+            print(f"Length: {len(result['content']):,} chars")
+        else:
+            print(f"Error: {meta.get('error', 'unknown')}")
+        print()
 
 
 if __name__ == "__main__":
