@@ -52,6 +52,7 @@ def needs_browser(html: str, url: str) -> tuple[bool, str]:
 #### **Proxy Configuration**
 - **Environment Variables**: `PROXY_URL`, `PROXY_USER`, `PROXY_PASS`
 - **Authentication**: Automatic credential injection
+- **Protocol Support**: Automatic `http://` scheme addition if missing
 - **Domain Bypass**: Special handling for `abc.com` domains
 
 #### **Proxy Strategy**
@@ -187,7 +188,7 @@ GOOGLE_CSE_ID=your_cse_id
 TAVILY_API_KEY=your_tavily_key
 
 # Proxy Configuration (optional)
-PROXY_URL=http://proxy.example.com:8080
+PROXY_URL=http://proxy.example.com:8080  # or just proxy.example.com:8080 (http:// added automatically)
 PROXY_USER=username
 PROXY_PASS=password
 

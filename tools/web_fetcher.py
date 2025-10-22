@@ -302,16 +302,28 @@ class OptimizedHybridScraper:
         if not self.proxy_configured:
             return None
         
-        # Use the configured proxy URL
-        proxy_url = self.proxy_url
+        # Ensure proxy URL has proper scheme
+        proxy_url = self.proxy_url.strip()
+        
+        # Add scheme if missing (default to http://)
+        if not proxy_url.startswith(('http://', 'https://')):
+            proxy_url = f"http://{proxy_url}"
+            logger.debug(f"   Added default http:// scheme to proxy URL")
         
         # Add authentication if provided
         if self.proxy_user and self.proxy_pass:
             # Parse the URL to add authentication
             from urllib.parse import urlparse, urlunparse
             parsed = urlparse(proxy_url)
+            
             # Reconstruct with authentication
-            proxy_url = f"{parsed.scheme}://{self.proxy_user}:{self.proxy_pass}@{parsed.netloc}"
+            if parsed.port:
+                netloc = f"{self.proxy_user}:{self.proxy_pass}@{parsed.hostname}:{parsed.port}"
+            else:
+                netloc = f"{self.proxy_user}:{self.proxy_pass}@{parsed.hostname}"
+            
+            proxy_url = f"{parsed.scheme}://{netloc}"
+            logger.debug(f"   Added authentication to proxy URL")
         
         return proxy_url
     
