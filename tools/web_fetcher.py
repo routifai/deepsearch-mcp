@@ -229,14 +229,15 @@ class OptimizedHybridScraper:
             logger.info(f"   Proxy auth: {'Yes' if self.proxy_user else 'No'}")
     
     async def __aenter__(self):
-        # Create SSL context
-        if self.verify_ssl:
-            ssl_context = ssl.create_default_context()
-        else:
-            ssl_context = ssl.create_default_context()
+        # Create SSL context - start with strict verification
+        ssl_context = ssl.create_default_context()
+        
+        if not self.verify_ssl:
             ssl_context.check_hostname = False
             ssl_context.verify_mode = ssl.CERT_NONE
             logger.warning("⚠️  SSL verification disabled")
+        else:
+            logger.info("🔒 SSL verification enabled")
         
         # Create HTTP session
         timeout = aiohttp.ClientTimeout(total=self.timeout)
@@ -461,6 +462,80 @@ class OptimizedHybridScraper:
             )
         
         except Exception as e:
+            # Check if it's an SSL certificate error
+            error_str = str(e).lower()
+            if 'ssl' in error_str and ('certificate' in error_str or 'cert' in error_str):
+                logger.warning(f"   🔒 SSL certificate error detected, retrying with relaxed SSL...")
+                
+                # Create a new session with relaxed SSL settings
+                try:
+                    ssl_context = ssl.create_default_context()
+                    ssl_context.check_hostname = False
+                    ssl_context.verify_mode = ssl.CERT_NONE
+                    
+                    timeout = aiohttp.ClientTimeout(total=self.timeout)
+                    connector = aiohttp.TCPConnector(ssl=ssl_context, limit=100)
+                    
+                    async with aiohttp.ClientSession(
+                        timeout=timeout,
+                        connector=connector,
+                        headers={'User-Agent': self.user_agent}
+                    ) as relaxed_session:
+                        logger.info(f"   🔄 Retrying with relaxed SSL: {url}")
+                        
+                        async with relaxed_session.get(url) as response:
+                            if response.status != 200:
+                                logger.warning(f"   ⚠️  Status {response.status}")
+                                return ScrapResult(
+                                    url=url, content="", raw_html=None, metadata={},
+                                    method="http", success=False,
+                                    error=f"HTTP {response.status}",
+                                    response_time=time.time() - start_time
+                                )
+                            
+                            html = await response.text()
+                            logger.debug(f"   ✅ Got {len(html):,} bytes with relaxed SSL")
+                        
+                        # Check if browser needed
+                        needs_browser, reason = self.detector.needs_browser(html, url)
+                        
+                        if needs_browser:
+                            logger.warning(f"   ⚠️  Needs browser: {reason}")
+                            return ScrapResult(
+                                url=url, content="", raw_html=None,
+                                metadata={'detection_reason': reason},
+                                method="http", success=False,
+                                error=f"Needs browser: {reason}",
+                                response_time=time.time() - start_time
+                            )
+                        
+                        # Extract text
+                        soup = BeautifulSoup(html, 'lxml')
+                        text = self.text_extractor.extract(html, url)
+                        
+                        metadata = self._extract_metadata(soup, url)
+                        metadata.update({
+                            'content_length': len(text),
+                            'browser_rendered': False,
+                            'proxy_used': False,
+                            'ssl_relaxed': True,
+                            'response_time': time.time() - start_time
+                        })
+                        
+                        self.stats['http_scrapes'] += 1
+                        
+                        elapsed = time.time() - start_time
+                        logger.info(f"✅ HTTP SUCCESS (relaxed SSL): {url} ({elapsed:.2f}s, {len(text):,} chars)")
+                        
+                        return ScrapResult(
+                            url=url, content=text, raw_html=None,
+                            metadata=metadata, method="http",
+                            success=True, response_time=elapsed
+                        )
+                        
+                except Exception as retry_error:
+                    logger.error(f"   ❌ Relaxed SSL retry also failed: {str(retry_error)[:100]}")
+            
             self.stats['failed_scrapes'] += 1
             logger.error(f"❌ HTTP FAILED: {url} - {str(e)[:100]}")
             return ScrapResult(
@@ -551,20 +626,28 @@ class OptimizedHybridScraper:
         logger.info(f"\n{'='*70}")
         logger.info(f"🎯 Starting: {url}")
         
-        # Try with proxy first if configured
-        if self.proxy_configured and self.use_proxy and self.proxy_session:
-            logger.info(f"🌐 Trying with proxy first...")
-            result = await self._scrape_http_with_proxy(url)
-            
-            if result.success:
-                logger.info(f"✅ Proxy success: {url}")
-                return result
-            
-            logger.warning(f"⚠️  Proxy failed: {result.error}")
-            logger.info(f"🔄 Falling back to direct connection...")
+        # Check if URL should bypass proxy (for abc.com domains)
+        domain = urlparse(url).netloc.lower()
+        bypass_proxy = domain.endswith('abc.com') or 'abc.com' in domain
         
-        # Try without proxy (direct connection)
-        result = await self._scrape_http(url)
+        if bypass_proxy:
+            logger.info(f"🔄 Bypassing proxy for abc.com domain: {domain}")
+            result = await self._scrape_http(url)
+        else:
+            # Try with proxy first if configured
+            if self.proxy_configured and self.use_proxy and self.proxy_session:
+                logger.info(f"🌐 Trying with proxy first...")
+                result = await self._scrape_http_with_proxy(url)
+                
+                if result.success:
+                    logger.info(f"✅ Proxy success: {url}")
+                    return result
+                
+                logger.warning(f"⚠️  Proxy failed: {result.error}")
+                logger.info(f"🔄 Falling back to direct connection...")
+            
+            # Try without proxy (direct connection)
+            result = await self._scrape_http(url)
         
         if result.success:
             return result
@@ -696,4 +779,10 @@ class WebFetcher:
         except Exception as e:
             logger.error(f"Error fetching {url}: {e}")
             return ""
+    
+    async def cleanup(self):
+        """Clean up the scraper session"""
+        if self.scraper:
+            await self.scraper.__aexit__(None, None, None)
+            self.scraper = None
 
