@@ -5,7 +5,7 @@ Tests both HTTP and Browser paths with sites that actually need JS
 """
 
 import asyncio
-from tools.web_fetcher import TrueLightweightHybridScraper
+from tools.web_fetcher import OptimizedHybridScraper
 import logging
 
 logger = logging.getLogger('TestRunner')
@@ -32,7 +32,7 @@ async def test_both_paths():
     print("   • Dynamic sites → Should use Browser 🌐")
     print("   • We'll see which is which!\n")
     
-    async with TrueLightweightHybridScraper(
+    async with OptimizedHybridScraper(
         rate_limit=1.0,
         max_concurrent=2,
         timeout=15

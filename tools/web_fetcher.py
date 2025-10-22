@@ -139,7 +139,7 @@ class DynamicContentDetector:
             logger.warning(f"      └─ ❌ JS FRAMEWORK detected: {detected}...")
             return True, "js_framework"
         
-        logger.debug(f"      ├─ No JS frameworks found")
+        logger.debug("      ├─ No JS frameworks found")
         
         # Check 3: Script ratio
         scripts = re.findall(r'<script[^>]*>.*?</script>', html, re.DOTALL)
@@ -155,10 +155,10 @@ class DynamicContentDetector:
         
         # Check 4: SPA patterns
         if 'spa-' in html.lower() or 'single-page' in html.lower():
-            logger.warning(f"      └─ ❌ SPA PATTERN detected")
+            logger.warning("      └─ ❌ SPA PATTERN detected")
             return True, "spa_pattern"
         
-        logger.info(f"      └─ ✅ STATIC CONTENT - HTTP will work!")
+        logger.info("      └─ ✅ STATIC CONTENT - HTTP will work!")
         return False, "static_content"
 
 
@@ -218,7 +218,7 @@ class OptimizedHybridScraper:
             'failed_scrapes': 0
         }
         
-        logger.info(f"🚀 Scraper initialized")
+        logger.info("🚀 Scraper initialized")
         logger.info(f"   Rate limit: {rate_limit} req/s")
         logger.info(f"   Max concurrent: {max_concurrent}")
         logger.info(f"   Timeout: {timeout}s")
@@ -308,7 +308,7 @@ class OptimizedHybridScraper:
         # Add scheme if missing (default to http://)
         if not proxy_url.startswith(('http://', 'https://')):
             proxy_url = f"http://{proxy_url}"
-            logger.debug(f"   Added default http:// scheme to proxy URL")
+            logger.debug("   Added default http:// scheme to proxy URL")
         
         # Add authentication if provided
         if self.proxy_user and self.proxy_pass:
@@ -323,7 +323,7 @@ class OptimizedHybridScraper:
                 netloc = f"{self.proxy_user}:{self.proxy_pass}@{parsed.hostname}"
             
             proxy_url = f"{parsed.scheme}://{netloc}"
-            logger.debug(f"   Added authentication to proxy URL")
+            logger.debug("   Added authentication to proxy URL")
         
         return proxy_url
     
@@ -474,12 +474,29 @@ class OptimizedHybridScraper:
             )
         
         except Exception as e:
-            # Check if it's an SSL certificate error
+            # Enhanced error handling with better categorization
             error_str = str(e).lower()
+            error_type = "unknown"
+            
             if 'ssl' in error_str and ('certificate' in error_str or 'cert' in error_str):
-                logger.warning(f"   🔒 SSL certificate error detected, retrying with relaxed SSL...")
+                error_type = "ssl_certificate"
+                logger.warning("   🔒 SSL certificate error detected")
+            elif 'connection reset by peer' in error_str:
+                error_type = "connection_reset"
+                logger.warning("   🔌 Connection reset by peer detected")
+            elif 'timeout' in error_str:
+                error_type = "timeout"
+                logger.warning("   ⏰ Network timeout detected")
+            elif 'connection' in error_str:
+                error_type = "connection_error"
+                logger.warning("   🌐 Connection error detected")
+            else:
+                logger.warning(f"   ❓ HTTP error: {str(e)[:100]}")
+            
+            # Try relaxed SSL for SSL-related errors
+            if error_type in ["ssl_certificate", "connection_reset"]:
+                logger.info(f"   🔄 Retrying with relaxed SSL for {error_type}...")
                 
-                # Create a new session with relaxed SSL settings
                 try:
                     ssl_context = ssl.create_default_context()
                     ssl_context.check_hostname = False
@@ -549,7 +566,7 @@ class OptimizedHybridScraper:
                     logger.error(f"   ❌ Relaxed SSL retry also failed: {str(retry_error)[:100]}")
             
             self.stats['failed_scrapes'] += 1
-            logger.error(f"❌ HTTP FAILED: {url} - {str(e)[:100]}")
+            logger.error(f"❌ HTTP FAILED ({error_type}): {url} - {str(e)[:100]}")
             return ScrapResult(
                 url=url, content="", raw_html=None, metadata={},
                 method="http", success=False,
@@ -563,7 +580,7 @@ class OptimizedHybridScraper:
         try:
             # Lazy load Playwright
             if not self.browser:
-                logger.info(f"🌐 Initializing browser (first use)...")
+                logger.info("🌐 Initializing browser (first use)...")
                 from playwright.async_api import async_playwright
                 
                 self.playwright = await async_playwright().start()
@@ -580,26 +597,26 @@ class OptimizedHybridScraper:
                     logger.info(f"   🌐 Browser will use proxy: {self.proxy_url}")
                 
                 self.browser_context = await self.browser.new_context(**context_options)
-                logger.info(f"   ✅ Browser ready")
+                logger.info("   ✅ Browser ready")
             
             logger.info(f"🌐 BROWSER: Loading {url}")
             
             page = await self.browser_context.new_page()
             
             try:
-                logger.debug(f"   🔄 Navigating...")
+                logger.debug("   🔄 Navigating...")
                 await page.goto(url, wait_until="domcontentloaded", timeout=self.timeout * 1000)
                 
-                logger.debug(f"   ⏳ Waiting 2s for JavaScript...")
+                logger.debug("   ⏳ Waiting 2s for JavaScript...")
                 await page.wait_for_timeout(2000)
                 
-                logger.debug(f"   📥 Getting rendered HTML...")
+                logger.debug("   📥 Getting rendered HTML...")
                 html = await page.content()
                 logger.debug(f"   ✅ Got {len(html):,} bytes")
                 
                 soup = BeautifulSoup(html, 'lxml')
                 
-                logger.debug(f"   📝 Extracting text...")
+                logger.debug("   📝 Extracting text...")
                 text = self.text_extractor.extract(html, url)
                 
                 metadata = self._extract_metadata(soup, url)
@@ -622,7 +639,7 @@ class OptimizedHybridScraper:
             
             finally:
                 await page.close()
-                logger.debug(f"   🔒 Browser page closed")
+                logger.debug("   🔒 Browser page closed")
         
         except Exception as e:
             self.stats['failed_scrapes'] += 1
@@ -648,7 +665,7 @@ class OptimizedHybridScraper:
         else:
             # Try with proxy first if configured
             if self.proxy_configured and self.use_proxy and self.proxy_session:
-                logger.info(f"🌐 Trying with proxy first...")
+                logger.info("🌐 Trying with proxy first...")
                 result = await self._scrape_http_with_proxy(url)
                 
                 if result.success:
@@ -656,7 +673,7 @@ class OptimizedHybridScraper:
                     return result
                 
                 logger.warning(f"⚠️  Proxy failed: {result.error}")
-                logger.info(f"🔄 Falling back to direct connection...")
+                logger.info("🔄 Falling back to direct connection...")
             
             # Try without proxy (direct connection)
             result = await self._scrape_http(url)
@@ -664,30 +681,27 @@ class OptimizedHybridScraper:
         if result.success:
             return result
         
-        if result.error and "Needs browser" in result.error:
-            logger.warning(f"↪️  Falling back to browser...")
-            browser_result = await self._scrape_browser(url)
-            
-            # If browser with proxy fails and we have proxy configured, try browser without proxy
-            if not browser_result.success and self.proxy_configured and self.use_proxy:
-                logger.warning(f"⚠️  Browser with proxy failed: {browser_result.error}")
-                logger.info(f"🔄 Trying browser without proxy...")
-                
-                # Create a new browser context without proxy
-                if self.browser:
-                    await self.browser_context.close()
-                    self.browser_context = await self.browser.new_context(
-                        user_agent=self.user_agent
-                    )
-                    logger.info(f"   ✅ Browser context recreated without proxy")
-                
-                browser_result = await self._scrape_browser(url)
-            
-            return browser_result
+        # Enhanced fallback: Try browser for ANY HTTP failure
+        logger.warning(f"⚠️  HTTP failed: {result.error}")
+        logger.info("🔄 Falling back to browser for ANY HTTP failure...")
+        browser_result = await self._scrape_browser(url)
         
-        self.stats['failed_scrapes'] += 1
-        logger.error(f"❌ FAILED: {url}")
-        return result
+        # If browser with proxy fails and we have proxy configured, try browser without proxy
+        if not browser_result.success and self.proxy_configured and self.use_proxy:
+            logger.warning(f"⚠️  Browser with proxy failed: {browser_result.error}")
+            logger.info("🔄 Trying browser without proxy...")
+            
+            # Create a new browser context without proxy
+            if self.browser:
+                await self.browser_context.close()
+                self.browser_context = await self.browser.new_context(
+                    user_agent=self.user_agent
+                )
+                logger.info("   ✅ Browser context recreated without proxy")
+            
+            browser_result = await self._scrape_browser(url)
+        
+        return browser_result
     
     async def scrape_urls(
         self,
@@ -703,7 +717,7 @@ class OptimizedHybridScraper:
         if show_progress:
             logger.info(f"\n{'='*70}")
             logger.info(f"🚀 BATCH SCRAPE: {len(urls)} URLs")
-            logger.info(f"   Strategy: HTTP first → Browser fallback")
+            logger.info("   Strategy: HTTP first → Browser fallback")
             logger.info(f"{'='*70}\n")
         
         async def scrape_with_semaphore(url: str):
@@ -733,7 +747,7 @@ class OptimizedHybridScraper:
         
         if show_progress:
             logger.info(f"\n{'='*70}")
-            logger.info(f"📊 BATCH COMPLETE")
+            logger.info("📊 BATCH COMPLETE")
             logger.info(f"{'='*70}")
             
             success_count = sum(1 for r in formatted_results if r['metadata']['success'])
