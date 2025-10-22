@@ -492,3 +492,40 @@ class OptimizedHybridScraper:
         
         return formatted_results
 
+
+# ============================================================================
+# MCP SERVER COMPATIBILITY WRAPPER
+# ============================================================================
+
+class WebFetcher:
+    """WebFetcher class for MCP server compatibility"""
+    
+    def __init__(self):
+        self.scraper = None
+    
+    async def fetch_url(self, url: str, mode: str = "partial") -> str:
+        """
+        Fetch content from a single URL with automatic truncation
+        
+        Args:
+            url: URL to fetch
+            mode: Fetch mode (partial/full) - currently only partial is supported
+            
+        Returns:
+            Extracted and truncated content from the URL
+        """
+        if not self.scraper:
+            self.scraper = OptimizedHybridScraper()
+            await self.scraper.__aenter__()
+        
+        try:
+            result = await self.scraper.scrape_single(url)
+            if result.success:
+                return result.content
+            else:
+                logger.warning(f"Failed to fetch {url}: {result.error}")
+                return ""
+        except Exception as e:
+            logger.error(f"Error fetching {url}: {e}")
+            return ""
+
