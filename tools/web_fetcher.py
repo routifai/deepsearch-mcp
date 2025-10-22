@@ -24,6 +24,11 @@ from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 import re
 from collections import defaultdict
+from dotenv import load_dotenv
+import os
+
+# Load environment variables FIRST
+load_dotenv()
 
 # ============================================================================
 # LOGGING CONFIGURATION - CONSOLE ONLY
@@ -176,7 +181,7 @@ class RateLimiter:
 
 
 class OptimizedHybridScraper:
-    """Optimized Hybrid Scraper - Fast HTTP + Simple text extraction"""
+    """Optimized Hybrid Scraper - Fast HTTP + Simple text extraction with proxy fallback"""
     
     def __init__(
         self,
@@ -184,13 +189,21 @@ class OptimizedHybridScraper:
         max_concurrent: int = 20,
         timeout: int = 10,
         user_agent: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        verify_ssl: bool = True
+        verify_ssl: bool = True,
+        use_proxy: bool = True
     ):
         self.rate_limiter = RateLimiter(rate_limit)
         self.semaphore = asyncio.Semaphore(max_concurrent)
         self.timeout = timeout
         self.user_agent = user_agent
         self.verify_ssl = verify_ssl
+        self.use_proxy = use_proxy
+        
+        # Proxy configuration - loaded directly from environment
+        self.proxy_url = os.getenv("PROXY_URL", "")
+        self.proxy_user = os.getenv("PROXY_USER", "")
+        self.proxy_pass = os.getenv("PROXY_PASS", "")
+        self.proxy_configured = bool(self.proxy_url)
         
         self.session: Optional[aiohttp.ClientSession] = None
         self.browser = None
@@ -210,6 +223,10 @@ class OptimizedHybridScraper:
         logger.info(f"   Max concurrent: {max_concurrent}")
         logger.info(f"   Timeout: {timeout}s")
         logger.info(f"   SSL verify: {verify_ssl}")
+        logger.info(f"   Proxy configured: {self.proxy_configured}")
+        if self.proxy_configured:
+            logger.info(f"   Proxy URL: {self.proxy_url}")
+            logger.info(f"   Proxy auth: {'Yes' if self.proxy_user else 'No'}")
     
     async def __aenter__(self):
         # Create SSL context
@@ -231,13 +248,28 @@ class OptimizedHybridScraper:
             headers={'User-Agent': self.user_agent}
         )
         
-        logger.info("✅ HTTP session created")
+        # Create proxy session if proxy is configured
+        if self.proxy_configured and self.use_proxy:
+            self.proxy_session = aiohttp.ClientSession(
+                timeout=timeout,
+                connector=connector,
+                headers={'User-Agent': self.user_agent}
+            )
+            logger.info("✅ HTTP sessions created (with and without proxy)")
+        else:
+            self.proxy_session = None
+            logger.info("✅ HTTP session created (no proxy)")
+        
         return self
     
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         if self.session:
             await self.session.close()
             logger.info("🔒 HTTP session closed")
+        
+        if self.proxy_session:
+            await self.proxy_session.close()
+            logger.info("🔒 Proxy session closed")
         
         if self.browser_context:
             await self.browser_context.close()
@@ -263,6 +295,102 @@ class OptimizedHybridScraper:
             logger.debug(f"   Metadata extraction error: {e}")
         
         return metadata
+    
+    def _get_proxy_url(self) -> str:
+        """Get proxy URL with authentication if configured"""
+        if not self.proxy_configured:
+            return None
+        
+        # Use the configured proxy URL
+        proxy_url = self.proxy_url
+        
+        # Add authentication if provided
+        if self.proxy_user and self.proxy_pass:
+            # Parse the URL to add authentication
+            from urllib.parse import urlparse, urlunparse
+            parsed = urlparse(proxy_url)
+            # Reconstruct with authentication
+            proxy_url = f"{parsed.scheme}://{self.proxy_user}:{self.proxy_pass}@{parsed.netloc}"
+        
+        return proxy_url
+    
+    async def _scrape_http_with_proxy(self, url: str) -> ScrapResult:
+        """HTTP scraping with proxy"""
+        start_time = time.time()
+        
+        try:
+            domain = urlparse(url).netloc
+            await self.rate_limiter.wait(domain)
+            
+            proxy_url = self._get_proxy_url()
+            logger.info(f"🌐 PROXY: Fetching {url} via {self.proxy_url}")
+            
+            async with self.proxy_session.get(url, proxy=proxy_url) as response:
+                if response.status != 200:
+                    logger.warning(f"   ⚠️  Proxy Status {response.status}")
+                    return ScrapResult(
+                        url=url, content="", raw_html=None, metadata={},
+                        method="proxy", success=False,
+                        error=f"Proxy HTTP {response.status}",
+                        response_time=time.time() - start_time
+                    )
+                
+                html = await response.text()
+                logger.debug(f"   ✅ Got {len(html):,} bytes via proxy")
+            
+            # Check if browser needed
+            needs_browser, reason = self.detector.needs_browser(html, url)
+            
+            if needs_browser:
+                logger.warning(f"   ⚠️  Needs browser: {reason}")
+                return ScrapResult(
+                    url=url, content="", raw_html=None,
+                    metadata={'detection_reason': reason},
+                    method="proxy", success=False,
+                    error=f"Needs browser: {reason}",
+                    response_time=time.time() - start_time
+                )
+            
+            # Extract text (FAST - no markdown conversion)
+            soup = BeautifulSoup(html, 'lxml')
+            text = self.text_extractor.extract(html, url)
+            
+            metadata = self._extract_metadata(soup, url)
+            metadata.update({
+                'content_length': len(text),
+                'browser_rendered': False,
+                'proxy_used': True,
+                'response_time': time.time() - start_time
+            })
+            
+            self.stats['http_scrapes'] += 1
+            
+            elapsed = time.time() - start_time
+            logger.info(f"✅ PROXY SUCCESS: {url} ({elapsed:.2f}s, {len(text):,} chars)")
+            
+            return ScrapResult(
+                url=url, content=text, raw_html=None,
+                metadata=metadata, method="proxy",
+                success=True, response_time=elapsed
+            )
+        
+        except asyncio.TimeoutError:
+            self.stats['failed_scrapes'] += 1
+            logger.error(f"❌ PROXY TIMEOUT: {url}")
+            return ScrapResult(
+                url=url, content="", raw_html=None, metadata={},
+                method="proxy", success=False,
+                error="Proxy timeout", response_time=time.time() - start_time
+            )
+        
+        except Exception as e:
+            self.stats['failed_scrapes'] += 1
+            logger.error(f"❌ PROXY FAILED: {url} - {str(e)[:100]}")
+            return ScrapResult(
+                url=url, content="", raw_html=None, metadata={},
+                method="proxy", success=False,
+                error=str(e), response_time=time.time() - start_time
+            )
     
     async def _scrape_http(self, url: str) -> ScrapResult:
         """Fast HTTP scraping with simple text extraction"""
@@ -308,6 +436,7 @@ class OptimizedHybridScraper:
             metadata.update({
                 'content_length': len(text),
                 'browser_rendered': False,
+                'proxy_used': False,
                 'response_time': time.time() - start_time
             })
             
@@ -352,9 +481,18 @@ class OptimizedHybridScraper:
                 
                 self.playwright = await async_playwright().start()
                 self.browser = await self.playwright.chromium.launch(headless=True)
-                self.browser_context = await self.browser.new_context(
-                    user_agent=self.user_agent
-                )
+                
+                # Configure browser context with proxy if available
+                context_options = {
+                    'user_agent': self.user_agent
+                }
+                
+                if self.proxy_configured and self.use_proxy:
+                    proxy_url = self._get_proxy_url()
+                    context_options['proxy'] = {'server': proxy_url}
+                    logger.info(f"   🌐 Browser will use proxy: {self.proxy_url}")
+                
+                self.browser_context = await self.browser.new_context(**context_options)
                 logger.info(f"   ✅ Browser ready")
             
             logger.info(f"🌐 BROWSER: Loading {url}")
@@ -409,10 +547,23 @@ class OptimizedHybridScraper:
             )
     
     async def scrape_single(self, url: str) -> ScrapResult:
-        """Scrape single URL with hybrid approach"""
+        """Scrape single URL with proxy fallback approach"""
         logger.info(f"\n{'='*70}")
         logger.info(f"🎯 Starting: {url}")
         
+        # Try with proxy first if configured
+        if self.proxy_configured and self.use_proxy and self.proxy_session:
+            logger.info(f"🌐 Trying with proxy first...")
+            result = await self._scrape_http_with_proxy(url)
+            
+            if result.success:
+                logger.info(f"✅ Proxy success: {url}")
+                return result
+            
+            logger.warning(f"⚠️  Proxy failed: {result.error}")
+            logger.info(f"🔄 Falling back to direct connection...")
+        
+        # Try without proxy (direct connection)
         result = await self._scrape_http(url)
         
         if result.success:
@@ -420,7 +571,24 @@ class OptimizedHybridScraper:
         
         if result.error and "Needs browser" in result.error:
             logger.warning(f"↪️  Falling back to browser...")
-            return await self._scrape_browser(url)
+            browser_result = await self._scrape_browser(url)
+            
+            # If browser with proxy fails and we have proxy configured, try browser without proxy
+            if not browser_result.success and self.proxy_configured and self.use_proxy:
+                logger.warning(f"⚠️  Browser with proxy failed: {browser_result.error}")
+                logger.info(f"🔄 Trying browser without proxy...")
+                
+                # Create a new browser context without proxy
+                if self.browser:
+                    await self.browser_context.close()
+                    self.browser_context = await self.browser.new_context(
+                        user_agent=self.user_agent
+                    )
+                    logger.info(f"   ✅ Browser context recreated without proxy")
+                
+                browser_result = await self._scrape_browser(url)
+            
+            return browser_result
         
         self.stats['failed_scrapes'] += 1
         logger.error(f"❌ FAILED: {url}")
@@ -498,7 +666,7 @@ class OptimizedHybridScraper:
 # ============================================================================
 
 class WebFetcher:
-    """WebFetcher class for MCP server compatibility"""
+    """WebFetcher class for MCP server compatibility with proxy fallback"""
     
     def __init__(self):
         self.scraper = None
@@ -515,7 +683,7 @@ class WebFetcher:
             Extracted and truncated content from the URL
         """
         if not self.scraper:
-            self.scraper = OptimizedHybridScraper()
+            self.scraper = OptimizedHybridScraper(use_proxy=True)
             await self.scraper.__aenter__()
         
         try:

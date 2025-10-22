@@ -47,7 +47,7 @@ if not validate_startup_config():
 
 # Initialize FastMCP
 mcp = FastMCP("deepsearch-mcp")
-web_fetcher = OptimizedHybridScraper()
+web_fetcher = WebFetcher()
 
 # ============================================================================
 # Memory-Efficient Content Cache with Size Limits

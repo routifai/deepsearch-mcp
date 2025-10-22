@@ -29,6 +29,7 @@ class Config:
     TIMEOUT_SECONDS: int = int(os.getenv("TIMEOUT_SECONDS", "30"))
     
     
+    
     def get_available_providers(self) -> List[str]:
         """Get list of available search providers"""
         providers = []
@@ -61,6 +62,7 @@ class Config:
     def is_valid(self) -> bool:
         """Check if configuration is valid"""
         return len(self.get_available_providers()) > 0
+    
     
     def get_status_info(self) -> dict:
         """Get configuration status for health checks"""
